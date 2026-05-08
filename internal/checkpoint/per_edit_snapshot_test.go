@@ -146,7 +146,7 @@ func TestRestore_UsesNextVersionAsTargetState(t *testing.T) {
 	}
 
 	// Restore cp1: should write STATE_AFTER_TURN_1 (== v2.bin == content captured at start of turn 2).
-	if err := store.Restore(context.Background(), "cp1"); err != nil {
+	if err := store.Restore(context.Background(), "cp1", ""); err != nil {
 		t.Fatalf("restore cp1: %v", err)
 	}
 	if got := mustReadFile(t, abs); got != "STATE_AFTER_TURN_1" {
@@ -170,7 +170,7 @@ func TestRestore_NoNextVersionIsNoOp(t *testing.T) {
 	}
 	store.Reset()
 
-	if err := store.Restore(context.Background(), "cp1"); err != nil {
+	if err := store.Restore(context.Background(), "cp1", ""); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
 	if got := mustReadFile(t, abs); got != "AFTER" {
@@ -212,7 +212,7 @@ func TestRestore_PreservesUntrackedFiles(t *testing.T) {
 	}
 	store.Reset()
 
-	if err := store.Restore(context.Background(), "cp1"); err != nil {
+	if err := store.Restore(context.Background(), "cp1", ""); err != nil {
 		t.Fatalf("restore cp1: %v", err)
 	}
 	if got := mustReadFile(t, tracked); got != "TR_AFTER_T1" {
@@ -341,7 +341,7 @@ func TestIndexReload_SurvivesProcessRestart(t *testing.T) {
 	// Workdir is "Y" right now (we never edited again post second capture).
 	// cp1 -> v_next(v1) = v2 -> meta.Existed=true, content="Y"
 	// So Restore writes "Y" back which is no-op effectively.
-	if err := revived.Restore(context.Background(), "cp1"); err != nil {
+	if err := revived.Restore(context.Background(), "cp1", ""); err != nil {
 		t.Fatalf("revived restore: %v", err)
 	}
 	if got := mustReadFile(t, abs); got != "Y" {
@@ -409,7 +409,7 @@ func TestRestore_RemovesFileWhenVNextExistedFalse(t *testing.T) {
 	store.Reset()
 
 	// Restore cp2: v2 captured "STILL_LIVE"; v_next(v2)=v3 has Existed=false → delete file.
-	if err := store.Restore(context.Background(), "cp2"); err != nil {
+	if err := store.Restore(context.Background(), "cp2", ""); err != nil {
 		t.Fatalf("restore cp2: %v", err)
 	}
 	if _, err := os.Stat(abs); !os.IsNotExist(err) {
@@ -519,7 +519,7 @@ func TestRestore_DirectoryRecreateAndDelete(t *testing.T) {
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatalf("manual remove before restore: %v", err)
 	}
-	if err := store.Restore(context.Background(), "cp1"); err != nil {
+	if err := store.Restore(context.Background(), "cp1", ""); err != nil {
 		t.Fatalf("restore cp1: %v", err)
 	}
 	info, err := os.Stat(dir)
@@ -531,7 +531,7 @@ func TestRestore_DirectoryRecreateAndDelete(t *testing.T) {
 	}
 
 	// Restore cp2: v_next=v3(Existed=false) → RemoveAll. Dir should be deleted.
-	if err := store.Restore(context.Background(), "cp2"); err != nil {
+	if err := store.Restore(context.Background(), "cp2", ""); err != nil {
 		t.Fatalf("restore cp2: %v", err)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -600,7 +600,7 @@ func TestRestore_DirectoryWithNestedFile(t *testing.T) {
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatalf("manual remove before restore: %v", err)
 	}
-	if err := store.Restore(context.Background(), "cp-dir"); err != nil {
+	if err := store.Restore(context.Background(), "cp-dir", ""); err != nil {
 		t.Fatalf("restore cp-dir: %v", err)
 	}
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
@@ -614,7 +614,7 @@ func TestRestore_DirectoryWithNestedFile(t *testing.T) {
 	if err := os.WriteFile(child, []byte("new"), 0o644); err != nil {
 		t.Fatalf("write child before restore: %v", err)
 	}
-	if err := store.Restore(context.Background(), "cp-remove"); err != nil {
+	if err := store.Restore(context.Background(), "cp-remove", ""); err != nil {
 		t.Fatalf("restore cp-remove: %v", err)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -677,7 +677,7 @@ func TestChangedFiles(t *testing.T) {
 	store.Reset()
 
 	// Restore to cp1 so workdir fallback matches cp1 state.
-	if err := store.Restore(context.Background(), "cp1"); err != nil {
+	if err := store.Restore(context.Background(), "cp1", ""); err != nil {
 		t.Fatalf("restore cp1: %v", err)
 	}
 	// c.txt did not exist in cp1; Restore won't remove it because cp1 doesn't know about it.
@@ -809,7 +809,7 @@ func TestCapturePostDelete_CreatesExistedFalseVersion(t *testing.T) {
 	}
 
 	// Restore cp1: v_next should be v2(Existed=false) → file should be deleted.
-	if err := store.Restore(context.Background(), "cp1"); err != nil {
+	if err := store.Restore(context.Background(), "cp1", ""); err != nil {
 		t.Fatalf("restore cp1: %v", err)
 	}
 	if _, err := os.Stat(abs); !os.IsNotExist(err) {
@@ -864,7 +864,7 @@ func TestCapturePostDelete_DirectoryTreeRecovery(t *testing.T) {
 	store.Reset()
 
 	// Restore cp1: v_next is v2(pre-delete, Existed=true) → tree recreated.
-	if err := store.Restore(context.Background(), "cp1"); err != nil {
+	if err := store.Restore(context.Background(), "cp1", ""); err != nil {
 		t.Fatalf("restore cp1: %v", err)
 	}
 	if got := mustReadFile(t, child1); got != "alpha" {
@@ -875,7 +875,7 @@ func TestCapturePostDelete_DirectoryTreeRecovery(t *testing.T) {
 	}
 
 	// Restore cp2: v_next is v3(post-delete, Existed=false) → tree deleted.
-	if err := store.Restore(context.Background(), "cp2"); err != nil {
+	if err := store.Restore(context.Background(), "cp2", ""); err != nil {
 		t.Fatalf("restore cp2: %v", err)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -933,7 +933,7 @@ func TestRestore_RemoveDirWithNestedFiles(t *testing.T) {
 	store.Reset()
 
 	// Restore cp2: should delete the tree.
-	if err := store.Restore(context.Background(), "cp2"); err != nil {
+	if err := store.Restore(context.Background(), "cp2", ""); err != nil {
 		t.Fatalf("restore cp2: %v", err)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -941,7 +941,7 @@ func TestRestore_RemoveDirWithNestedFiles(t *testing.T) {
 	}
 
 	// Restore cp1: should recreate the tree with original content.
-	if err := store.Restore(context.Background(), "cp1"); err != nil {
+	if err := store.Restore(context.Background(), "cp1", ""); err != nil {
 		t.Fatalf("restore cp1: %v", err)
 	}
 	if got := mustReadFile(t, child); got != "hello" {
@@ -1105,7 +1105,7 @@ func TestChangedFiles_NewFileDetectedAsAdded(t *testing.T) {
 	store.Reset()
 
 	// Restore to cp1 so workdir fallback matches cp1 state.
-	if err := store.Restore(context.Background(), "cp1"); err != nil {
+	if err := store.Restore(context.Background(), "cp1", ""); err != nil {
 		t.Fatalf("restore cp1: %v", err)
 	}
 	if err := os.Remove(filepath.Join(workdir, "b.txt")); err != nil && !os.IsNotExist(err) {
