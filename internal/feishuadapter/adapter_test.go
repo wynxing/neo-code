@@ -2954,6 +2954,899 @@ func TestIsMentionCurrentBotMatchesMentionAppID(t *testing.T) {
 	}
 }
 
+func TestBuildPendingPermissionPayloadAndFindApprovalDecision(t *testing.T) {
+	binding := sessionBinding{
+		ApprovalRecords: []approvalEntry{
+			{
+				RequestID: "req-pending",
+				ToolName:  "bash",
+				Operation: "exec",
+				Target:    "pwd",
+				Reason:    "need confirm",
+				Decision:  "pending",
+			},
+			{
+				RequestID: "req-approved",
+				Decision:  "allow_once",
+			},
+		},
+	}
+
+	payload, ok := buildPendingPermissionPayload(binding, " req-pending ")
+	if !ok {
+		t.Fatal("expected pending payload")
+	}
+	if payload.RequestID != "req-pending" || payload.ToolName != "bash" || payload.Operation != "exec" ||
+		payload.Target != "pwd" || payload.Message != "need confirm" {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+
+	if _, ok := buildPendingPermissionPayload(binding, "req-approved"); ok {
+		t.Fatal("expected resolved request to not build pending payload")
+	}
+	if _, ok := buildPendingPermissionPayload(binding, ""); ok {
+		t.Fatal("expected empty request id to fail")
+	}
+
+	if got := findApprovalDecision(binding.ApprovalRecords, " req-approved "); got != "allow_once" {
+		t.Fatalf("expected approval decision, got %q", got)
+	}
+	if got := findApprovalDecision(binding.ApprovalRecords, "missing"); got != "" {
+		t.Fatalf("expected missing decision to be empty, got %q", got)
+	}
+}
+
+func TestSyncBindingApprovalsFromFSMLocked(t *testing.T) {
+	adapter := newTestAdapter(t)
+	binding := sessionBinding{}
+	fsm := &approvalFSMState{
+		ActiveRequestID: "req-active",
+		Requests: map[string]approvalRequestNode{
+			"req-active": {
+				RequestID: "req-active",
+				ToolName:  "bash",
+				Operation: "exec",
+				Target:    "pwd",
+				Reason:    "pending reason",
+				Decision:  "pending",
+				State:     approvalRequestStateDisplayingPending,
+			},
+			"req-approved": {
+				RequestID: "req-approved",
+				ToolName:  "fs",
+				Operation: "read",
+				Target:    "file",
+				Reason:    "approved reason",
+				Decision:  "allow",
+				State:     approvalRequestStateResolvedApproved,
+			},
+			"req-rejected": {
+				RequestID: "req-rejected",
+				ToolName:  "net",
+				Operation: "post",
+				Target:    "url",
+				Reason:    "rejected reason",
+				Decision:  "deny",
+				State:     approvalRequestStateResolvedRejected,
+			},
+			"req-archived": {
+				RequestID: "req-archived",
+				ToolName:  "other",
+				Operation: "noop",
+				Target:    "x",
+				Reason:    "archived reason",
+				Decision:  "pending",
+				State:     approvalRequestStateArchived,
+			},
+		},
+	}
+
+	adapter.syncBindingApprovalsFromFSMLocked(&binding, fsm)
+	if binding.ApprovalStatus != "pending" {
+		t.Fatalf("expected pending approval status, got %q", binding.ApprovalStatus)
+	}
+	if len(binding.ApprovalRecords) != 4 {
+		t.Fatalf("expected 4 approval records, got %d", len(binding.ApprovalRecords))
+	}
+	if binding.ApprovalRecords[0].RequestID != "req-active" {
+		t.Fatalf("expected active request first, got %+v", binding.ApprovalRecords)
+	}
+
+	statusCases := []struct {
+		name string
+		fsm  *approvalFSMState
+		want string
+	}{
+		{
+			name: "rejected",
+			fsm: &approvalFSMState{
+				Requests: map[string]approvalRequestNode{
+					"req": {RequestID: "req", Decision: "reject", State: approvalRequestStateResolvedRejected},
+				},
+			},
+			want: "rejected",
+		},
+		{
+			name: "approved",
+			fsm: &approvalFSMState{
+				Requests: map[string]approvalRequestNode{
+					"req": {RequestID: "req", Decision: "allow_once", State: approvalRequestStateResolvedApproved},
+				},
+			},
+			want: "approved",
+		},
+		{
+			name: "mixed",
+			fsm: &approvalFSMState{
+				Requests: map[string]approvalRequestNode{
+					"req-a": {RequestID: "req-a", Decision: "allow_once", State: approvalRequestStateResolvedApproved},
+					"req-r": {RequestID: "req-r", Decision: "reject", State: approvalRequestStateResolvedRejected},
+				},
+			},
+			want: "mixed",
+		},
+		{
+			name: "none",
+			fsm: &approvalFSMState{
+				Requests: map[string]approvalRequestNode{
+					"req": {RequestID: "req", Decision: "", State: approvalRequestStateArchived},
+				},
+			},
+			want: "none",
+		},
+	}
+	for _, tc := range statusCases {
+		t.Run(tc.name, func(t *testing.T) {
+			derived := sessionBinding{}
+			adapter.syncBindingApprovalsFromFSMLocked(&derived, tc.fsm)
+			if derived.ApprovalStatus != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, derived.ApprovalStatus)
+			}
+		})
+	}
+}
+
+func TestApprovalHelperLookups(t *testing.T) {
+	if containsApprovalRequest([]string{" req-1 ", "req-2"}, "req-1") != true {
+		t.Fatal("expected request to be found in pending stack")
+	}
+	if containsApprovalRequest([]string{"req-1"}, " ") {
+		t.Fatal("expected empty request id to be rejected")
+	}
+	if containsApprovalRequest([]string{"req-1"}, "req-2") {
+		t.Fatal("expected missing request to not be found")
+	}
+
+	adapter := newTestAdapter(t)
+	adapter.mu.Lock()
+	adapter.approvalFSMByRun["run-a"] = &approvalFSMState{
+		ActiveRequestID: "shared",
+		Requests: map[string]approvalRequestNode{
+			"shared": {RequestID: "shared"},
+		},
+	}
+	adapter.approvalFSMByRun["run-b"] = &approvalFSMState{
+		Requests: map[string]approvalRequestNode{
+			"shared": {RequestID: "shared"},
+		},
+	}
+	adapter.approvalRequestRunIndex[approvalRequestScopedKey("run-a", "shared")] = "run-a"
+	adapter.approvalRequestRunIndex[approvalRequestScopedKey("run-b", "shared")] = "other-run"
+	adapter.approvalRequestIDRunIndex["shared"] = "run-b"
+	adapter.mu.Unlock()
+
+	adapter.mu.RLock()
+	got := adapter.resolveApprovalRunKeyByRequestLocked("shared")
+	adapter.mu.RUnlock()
+	if got != "run-a" {
+		t.Fatalf("expected active run to win fallback scan, got %q", got)
+	}
+
+	adapter.mu.Lock()
+	delete(adapter.approvalRequestRunIndex, approvalRequestScopedKey("run-a", "shared"))
+	adapter.approvalRequestRunIndex[approvalRequestScopedKey("run-b", "shared")] = "run-b"
+	adapter.mu.Unlock()
+
+	adapter.mu.RLock()
+	got = adapter.resolveApprovalRunKeyByRequestLocked("shared")
+	adapter.mu.RUnlock()
+	if got != "run-b" {
+		t.Fatalf("expected indexed run to be used after scoped entry removal, got %q", got)
+	}
+
+	adapter.mu.RLock()
+	if got = adapter.resolveApprovalRunKeyByRequestLocked("missing"); got != "" {
+		adapter.mu.RUnlock()
+		t.Fatalf("expected missing request id to resolve empty run key, got %q", got)
+	}
+	adapter.mu.RUnlock()
+}
+
+func TestApprovalOutboxVersionGuardsAndCleanup(t *testing.T) {
+	adapter := newTestAdapter(t)
+	messenger := adapterTestMessenger(adapter)
+
+	if gen, ver, ok := adapter.snapshotApprovalFSMVersion(""); ok || gen != 0 || ver != 0 {
+		t.Fatalf("expected empty run key snapshot miss, got %d %d %v", gen, ver, ok)
+	}
+	if adapter.shouldExecuteApprovalOutbox(approvalOutboxOperation{RunKey: "missing"}) {
+		t.Fatal("expected missing run key to fail preflight")
+	}
+
+	adapter.mu.Lock()
+	adapter.approvalFSMByRun["run-1"] = &approvalFSMState{Generation: 11, Version: 22}
+	adapter.mu.Unlock()
+
+	if gen, ver, ok := adapter.snapshotApprovalFSMVersion("run-1"); !ok || gen != 11 || ver != 22 {
+		t.Fatalf("unexpected snapshot: %d %d %v", gen, ver, ok)
+	}
+
+	match := approvalOutboxOperation{RunKey: "run-1", Generation: 11, Version: 22}
+	if !adapter.shouldExecuteApprovalOutbox(match) {
+		t.Fatal("expected matching outbox to pass preflight")
+	}
+	if adapter.shouldExecuteApprovalOutbox(approvalOutboxOperation{RunKey: "run-1", Generation: 11, Version: 21}) {
+		t.Fatal("expected stale outbox to fail preflight")
+	}
+
+	adapter.confirmApprovalOutbox(match)
+	adapter.confirmApprovalOutbox(approvalOutboxOperation{RunKey: "run-1", Generation: 10, Version: 22})
+	adapter.confirmApprovalOutbox(approvalOutboxOperation{RunKey: "missing", Generation: 1, Version: 1})
+
+	adapter.cleanupStalePermissionCard(match, "")
+	adapter.cleanupStalePermissionCard(match, "card-cleanup")
+	messages := messenger.snapshot()
+	if len(messages) == 0 || messages[len(messages)-1].kind != "delete_card" || messages[len(messages)-1].chatID != "card-cleanup" {
+		t.Fatalf("expected cleanup to delete stale card, got %+v", messages)
+	}
+}
+
+func TestSchedulePermissionCardDismiss(t *testing.T) {
+	adapter := newTestAdapter(t)
+	adapter.permissionCardDismissDelay = 5 * time.Millisecond
+	messenger := adapterTestMessenger(adapter)
+
+	adapter.mu.Lock()
+	adapter.approvalFSMByRun["run-1"] = &approvalFSMState{CardID: "card-1"}
+	adapter.approvalCardRunIndex["card-1"] = "run-1"
+	adapter.mu.Unlock()
+
+	adapter.schedulePermissionCardDismiss("req-1", "card-1")
+	time.Sleep(30 * time.Millisecond)
+
+	messages := messenger.snapshot()
+	if len(messages) == 0 || messages[len(messages)-1].kind != "delete_card" || messages[len(messages)-1].chatID != "card-1" {
+		t.Fatalf("expected permission card delete, got %+v", messages)
+	}
+
+	adapter.mu.RLock()
+	defer adapter.mu.RUnlock()
+	if _, ok := adapter.approvalCardRunIndex["card-1"]; ok {
+		t.Fatal("expected approval card index removed after dismiss")
+	}
+	if got := adapter.approvalFSMByRun["run-1"].CardID; got != "" {
+		t.Fatalf("expected fsm card id cleared, got %q", got)
+	}
+}
+
+func TestMarkRunTerminalFallbackPaths(t *testing.T) {
+	t.Run("empty card id sends terminal text", func(t *testing.T) {
+		adapter := newTestAdapter(t)
+		sessionID := BuildSessionID("chat-terminal-empty-card")
+		runID := BuildRunID("run-terminal-empty-card")
+		key := runBindingKey(sessionID, runID)
+
+		adapter.mu.Lock()
+		adapter.activeRuns[key] = sessionBinding{
+			SessionID: sessionID,
+			RunID:     runID,
+			ChatID:    "chat-terminal-empty-card",
+			Status:    "running",
+			Result:    "pending",
+		}
+		adapter.mu.Unlock()
+
+		adapter.markRunTerminal(sessionID, runID, "success", "", "fallback summary")
+
+		messages := adapterTestMessenger(adapter).snapshot()
+		if len(messages) == 0 || messages[len(messages)-1].kind != "text" {
+			t.Fatalf("expected fallback terminal text, got %+v", messages)
+		}
+		if !strings.Contains(messages[len(messages)-1].text, "fallback summary") {
+			t.Fatalf("expected fallback summary in terminal text, got %+v", messages[len(messages)-1])
+		}
+
+		adapter.mu.RLock()
+		binding := adapter.activeRuns[key]
+		adapter.mu.RUnlock()
+		if binding.LastSummary != "fallback summary" || binding.Status != "success" || binding.Result != "success" {
+			t.Fatalf("unexpected terminal binding: %+v", binding)
+		}
+	})
+
+	t.Run("card update failure falls back to text", func(t *testing.T) {
+		adapter := newTestAdapter(t)
+		messenger := adapterTestMessenger(adapter)
+		messenger.updateCardErr = fmt.Errorf("update failed")
+		sessionID := BuildSessionID("chat-terminal-update-fail")
+		runID := BuildRunID("run-terminal-update-fail")
+		key := runBindingKey(sessionID, runID)
+
+		adapter.mu.Lock()
+		adapter.activeRuns[key] = sessionBinding{
+			SessionID:   sessionID,
+			RunID:       runID,
+			ChatID:      "chat-terminal-update-fail",
+			CardID:      "status-card-1",
+			Status:      "running",
+			Result:      "pending",
+			LastSummary: "old summary",
+		}
+		adapter.mu.Unlock()
+
+		adapter.markRunTerminal(sessionID, runID, "failure", "new summary", "")
+
+		messages := messenger.snapshot()
+		if len(messages) < 2 {
+			t.Fatalf("expected update failure followed by fallback text, got %+v", messages)
+		}
+		last := messages[len(messages)-1]
+		if last.kind != "text" || !strings.Contains(last.text, "new summary") {
+			t.Fatalf("expected fallback text with new summary, got %+v", last)
+		}
+	})
+}
+
+func TestHandleMessageBranches(t *testing.T) {
+	t.Run("rejects missing identifiers", func(t *testing.T) {
+		adapter := newTestAdapter(t)
+		err := adapter.HandleMessage(context.Background(), FeishuMessageEvent{
+			MessageID:   "",
+			ChatID:      "chat",
+			ContentText: "run",
+		})
+		if err == nil || !strings.Contains(err.Error(), "missing message_id or chat_id") {
+			t.Fatalf("expected missing identifier error, got %v", err)
+		}
+	})
+
+	t.Run("ignores empty text and duplicate event", func(t *testing.T) {
+		adapter := newTestAdapter(t)
+		event := FeishuMessageEvent{
+			EventID:     "evt-empty",
+			MessageID:   "msg-empty",
+			ChatID:      "chat-empty",
+			ContentText: "   ",
+		}
+		if err := adapter.HandleMessage(context.Background(), event); err != nil {
+			t.Fatalf("handle empty text: %v", err)
+		}
+		if err := adapter.HandleMessage(context.Background(), event); err != nil {
+			t.Fatalf("handle duplicate empty text: %v", err)
+		}
+		if calls := adapterTestGateway(adapter).snapshotCalls(); len(calls) != 0 {
+			t.Fatalf("expected no gateway calls for empty text, got %v", calls)
+		}
+	})
+
+	t.Run("run failure sends fallback text", func(t *testing.T) {
+		adapter := newTestAdapter(t)
+		gateway := adapterTestGateway(adapter)
+		gateway.runErr = fmt.Errorf("run failed")
+
+		err := adapter.HandleMessage(context.Background(), FeishuMessageEvent{
+			EventID:     "evt-run-fail",
+			MessageID:   "msg-run-fail",
+			ChatID:      "chat-run-fail",
+			ChatType:    "group",
+			ContentText: "执行失败分支",
+		})
+		if err == nil || !strings.Contains(err.Error(), "run failed") {
+			t.Fatalf("expected run failure, got %v", err)
+		}
+
+		msgs := adapterTestMessenger(adapter).snapshot()
+		if len(msgs) == 0 || msgs[len(msgs)-1].kind != "text" || msgs[len(msgs)-1].text != "任务受理失败，请稍后重试。" {
+			t.Fatalf("expected fallback text after run failure, got %+v", msgs)
+		}
+
+		sessionID := BuildSessionID("chat-run-fail")
+		runID := BuildRunID("msg-run-fail")
+		adapter.mu.RLock()
+		_, exists := adapter.activeRuns[runBindingKey(sessionID, runID)]
+		adapter.mu.RUnlock()
+		if exists {
+			t.Fatal("expected failed run to be untracked")
+		}
+	})
+}
+
+func TestParseUserQuestionTextAnswerAndHelpers(t *testing.T) {
+	adapter := newTestAdapter(t)
+
+	if values, message, ok := adapter.parseUserQuestionTextAnswer("missing", " free text "); !ok || len(values) != 1 ||
+		values[0] != "free text" || message != "free text" {
+		t.Fatalf("expected fallback free text answer, got values=%v message=%q ok=%v", values, message, ok)
+	}
+	if _, _, ok := adapter.parseUserQuestionTextAnswer("missing", " "); ok {
+		t.Fatal("expected empty fallback answer to fail")
+	}
+
+	adapter.mu.Lock()
+	adapter.pendingQuestions["text"] = userQuestionEntry{RequestID: "text", Kind: "text"}
+	adapter.pendingQuestions["single-empty-options"] = userQuestionEntry{RequestID: "single-empty-options", Kind: "single_choice"}
+	adapter.pendingQuestions["single"] = userQuestionEntry{
+		RequestID: "single",
+		Kind:      "single_choice",
+		Options: []UserQuestionCardOption{
+			{Label: "Alpha"},
+			{Label: "Beta Option"},
+		},
+	}
+	adapter.pendingQuestions["multi"] = userQuestionEntry{
+		RequestID:  "multi",
+		Kind:       "multi_choice",
+		MaxChoices: 2,
+		Options: []UserQuestionCardOption{
+			{Label: "One"},
+			{Label: "Two"},
+			{Label: "Three"},
+		},
+	}
+	adapter.pendingQuestions["other"] = userQuestionEntry{RequestID: "other", Kind: "other"}
+	adapter.mu.Unlock()
+
+	if _, _, ok := adapter.parseUserQuestionTextAnswer("text", " "); ok {
+		t.Fatal("expected empty text answer to fail")
+	}
+	if values, message, ok := adapter.parseUserQuestionTextAnswer("text", "hello"); !ok || message != "hello" || values[0] != "hello" {
+		t.Fatalf("unexpected text answer parse result: values=%v message=%q ok=%v", values, message, ok)
+	}
+	if values, message, ok := adapter.parseUserQuestionTextAnswer("single-empty-options", "custom"); !ok || len(values) != 1 ||
+		values[0] != "custom" || message != "" {
+		t.Fatalf("unexpected single-choice without options result: values=%v message=%q ok=%v", values, message, ok)
+	}
+	if values, message, ok := adapter.parseUserQuestionTextAnswer("single", "2"); !ok || len(values) != 1 ||
+		values[0] != "Beta Option" || message != "" {
+		t.Fatalf("unexpected single-choice index result: values=%v message=%q ok=%v", values, message, ok)
+	}
+	if _, _, ok := adapter.parseUserQuestionTextAnswer("single", "missing"); ok {
+		t.Fatal("expected unknown single-choice label to fail")
+	}
+	if values, message, ok := adapter.parseUserQuestionTextAnswer("multi", "one, Two，one"); !ok || len(values) != 2 ||
+		values[0] != "One" || values[1] != "Two" || message != "" {
+		t.Fatalf("unexpected multi-choice result: values=%v message=%q ok=%v", values, message, ok)
+	}
+	if _, _, ok := adapter.parseUserQuestionTextAnswer("multi", "one two three"); ok {
+		t.Fatal("expected max-choices violation to fail")
+	}
+	if values, message, ok := adapter.parseUserQuestionTextAnswer("other", "free"); !ok || len(values) != 1 ||
+		values[0] != "free" || message != "free" {
+		t.Fatalf("unexpected default answer parse result: values=%v message=%q ok=%v", values, message, ok)
+	}
+
+	if got, ok := resolveChoiceLabel("  beta option ", []UserQuestionCardOption{{Label: "Alpha"}, {Label: "Beta Option"}}); !ok || got != "Beta Option" {
+		t.Fatalf("expected normalized label match, got %q %v", got, ok)
+	}
+	if _, ok := resolveChoiceLabel("9", []UserQuestionCardOption{{Label: "Alpha"}}); ok {
+		t.Fatal("expected out-of-range index to fail")
+	}
+
+	requestID, body := splitRequestAndBody(" req-1  line one line two ")
+	if requestID != "req-1" || body != "line one line two" {
+		t.Fatalf("unexpected request/body split: %q %q", requestID, body)
+	}
+	if requestID, body := splitRequestAndBody(" "); requestID != "" || body != "" {
+		t.Fatalf("expected empty split result, got %q %q", requestID, body)
+	}
+
+	tokens := splitMultiChoiceTokens(" one，two|three ; two ")
+	if len(tokens) != 3 || tokens[0] != "one" || tokens[1] != "two" || tokens[2] != "three" {
+		t.Fatalf("unexpected tokens: %v", tokens)
+	}
+	tokens = splitMultiChoiceTokens(" one   two  one ")
+	if len(tokens) != 2 || tokens[0] != "one" || tokens[1] != "two" {
+		t.Fatalf("unexpected whitespace tokens: %v", tokens)
+	}
+
+	unique := uniqueNonEmptyStrings([]string{" Alpha ", "alpha", "", "Beta"})
+	if len(unique) != 2 || unique[0] != "Alpha" || unique[1] != "Beta" {
+		t.Fatalf("unexpected unique strings: %v", unique)
+	}
+}
+
+func TestExtractUserQuestionRequestAndApprovalDecisionHelpers(t *testing.T) {
+	entry := extractUserQuestionRequest(map[string]any{
+		"payload": map[string]any{
+			"request_id":  " req-1 ",
+			"question_id": " q-1 ",
+			"title":       " 选择环境 ",
+			"description": " 请确认发布目标 ",
+			"kind":        " Multi_Choice ",
+			"allow_skip":  true,
+			"max_choices": int32(2),
+			"options": []any{
+				" 测试 ",
+				map[string]any{"label": " 生产 ", "description": " 正式环境 "},
+				map[string]any{"label": " "},
+				123,
+			},
+		},
+	})
+	if entry.RequestID != "req-1" || entry.QuestionID != "q-1" || entry.Title != "选择环境" ||
+		entry.Description != "请确认发布目标" || entry.Kind != "multi_choice" ||
+		!entry.AllowSkip || entry.MaxChoices != 2 {
+		t.Fatalf("unexpected user question entry: %+v", entry)
+	}
+	if len(entry.Options) != 2 || entry.Options[0].Label != "测试" || entry.Options[1].Label != "生产" ||
+		entry.Options[1].Description != "正式环境" {
+		t.Fatalf("unexpected user question options: %+v", entry.Options)
+	}
+	if fallback := extractUserQuestionRequest(nil); fallback.RequestID != "" || len(fallback.Options) != 0 {
+		t.Fatalf("expected nil envelope fallback, got %+v", fallback)
+	}
+
+	requestID, decision := extractPermissionResolved(map[string]any{
+		"payload": map[string]any{
+			"request_id": " req-2 ",
+			"decision":   " Allow ",
+		},
+	})
+	if requestID != "req-2" || decision != "allow" {
+		t.Fatalf("unexpected resolved permission payload: request_id=%q decision=%q", requestID, decision)
+	}
+	if requestID, decision := extractPermissionResolved(nil); requestID != "" || decision != "" {
+		t.Fatalf("expected nil permission resolved payload, got %q %q", requestID, decision)
+	}
+
+	if got := normalizeApprovalDecision(" Denied "); got != "reject" {
+		t.Fatalf("expected denied alias normalized to reject, got %q", got)
+	}
+	if got := normalizeApprovalDecision("allow_session"); got != "allow_session" {
+		t.Fatalf("expected allow_session to stay stable, got %q", got)
+	}
+	if !isPermissionRequestNotFoundError(fmt.Errorf("permission request abc not found")) {
+		t.Fatal("expected not-found error to be detected")
+	}
+	if isPermissionRequestNotFoundError(fmt.Errorf("other error")) {
+		t.Fatal("expected unrelated error to not match")
+	}
+	if !readBool(map[string]any{"ok": true}, "ok") {
+		t.Fatal("expected bool field to be read")
+	}
+	if readBool(map[string]any{"ok": "true"}, "ok") {
+		t.Fatal("expected non-bool field to fall back to false")
+	}
+}
+
+func TestUpdateUserQuestionStatusUpdatesCardsAndState(t *testing.T) {
+	adapter := newTestAdapter(t)
+	sessionID := BuildSessionID("chat-user-question-status")
+	runID := BuildRunID("run-user-question-status")
+	key := runBindingKey(sessionID, runID)
+
+	adapter.mu.Lock()
+	adapter.activeRuns[key] = sessionBinding{
+		SessionID: sessionID,
+		RunID:     runID,
+		ChatID:    "chat-user-question-status",
+		CardID:    "status-card-1",
+		Status:    "running",
+		Result:    "pending",
+	}
+	adapter.pendingQuestions["ask-1"] = userQuestionEntry{
+		RequestID: "ask-1",
+		Title:     "选择环境",
+		Kind:      "single_choice",
+	}
+	adapter.userQuestionCards["ask-1"] = "ask-card-1"
+	adapter.requestRuns["ask-1"] = key
+	adapter.mu.Unlock()
+
+	adapter.updateUserQuestionStatus("ask-1", "answered", []string{"测试"}, "已确认")
+
+	msgs := adapterTestMessenger(adapter).snapshot()
+	if len(msgs) < 2 {
+		t.Fatalf("expected status card and ask-user card updates, got %+v", msgs)
+	}
+	foundStatus := false
+	foundAskCard := false
+	for _, msg := range msgs {
+		if msg.kind == "update_card" && msg.cardID == "status-card-1" {
+			foundStatus = true
+		}
+		if msg.kind == "update_ask_card" && msg.chatID == "ask-card-1" && msg.resolvedUserQuestion != nil &&
+			msg.resolvedUserQuestion.RequestID == "ask-1" && msg.resolvedUserQuestion.Status == "answered" {
+			foundAskCard = true
+		}
+	}
+	if !foundStatus || !foundAskCard {
+		t.Fatalf("expected both card updates, got %+v", msgs)
+	}
+
+	adapter.mu.RLock()
+	binding := adapter.activeRuns[key]
+	_, pendingExists := adapter.pendingQuestions["ask-1"]
+	_, askCardExists := adapter.userQuestionCards["ask-1"]
+	_, requestExists := adapter.requestRuns["ask-1"]
+	adapter.mu.RUnlock()
+	if !strings.Contains(binding.LastSummary, "已确认") {
+		t.Fatalf("expected resolved summary recorded, got %+v", binding)
+	}
+	if pendingExists || askCardExists || requestExists {
+		t.Fatalf("expected ask-user indexes cleaned, pending=%v card=%v request=%v", pendingExists, askCardExists, requestExists)
+	}
+}
+
+func TestUpdateApprovalStatusPromotesNextPendingAndUpdatesCards(t *testing.T) {
+	adapter := newTestAdapter(t)
+	sessionID := BuildSessionID("chat-approval-update")
+	runID := BuildRunID("run-approval-update")
+	key := runBindingKey(sessionID, runID)
+
+	adapter.mu.Lock()
+	adapter.activeRuns[key] = sessionBinding{
+		SessionID: sessionID,
+		RunID:     runID,
+		ChatID:    "chat-approval-update",
+		CardID:    "status-card-1",
+		Status:    "waiting_approval",
+		Result:    "pending",
+	}
+	adapter.approvalFSMByRun[key] = &approvalFSMState{
+		Generation:      7,
+		Version:         3,
+		CardID:          "perm-card-1",
+		ActiveRequestID: "req-1",
+		PendingStack:    []string{"req-2"},
+		Requests: map[string]approvalRequestNode{
+			"req-1": {
+				RequestID: "req-1",
+				ToolName:  "bash",
+				Operation: "exec",
+				Target:    "pwd",
+				Reason:    "need first approval",
+				Decision:  "pending",
+				State:     approvalRequestStateDisplayingPending,
+			},
+			"req-2": {
+				RequestID: "req-2",
+				ToolName:  "fs",
+				Operation: "write",
+				Target:    "file.txt",
+				Reason:    "need second approval",
+				Decision:  "pending",
+				State:     approvalRequestStateQueued,
+			},
+		},
+	}
+	adapter.approvalRequestRunIndex[approvalRequestScopedKey(key, "req-1")] = key
+	adapter.approvalRequestRunIndex[approvalRequestScopedKey(key, "req-2")] = key
+	adapter.approvalRequestIDRunIndex["req-1"] = key
+	adapter.approvalRequestIDRunIndex["req-2"] = key
+	adapter.approvalCardRunIndex["perm-card-1"] = key
+	adapter.runPermissionCardHistory[key] = map[string]struct{}{
+		"perm-card-1":       {},
+		"perm-card-history": {},
+	}
+	adapter.mu.Unlock()
+
+	adapter.updateApprovalStatus("req-1", "allow")
+
+	msgs := adapterTestMessenger(adapter).snapshot()
+	kinds := map[string]int{}
+	for _, msg := range msgs {
+		kinds[msg.kind]++
+	}
+	if kinds["update_card"] == 0 || kinds["update_perm_card"] == 0 || kinds["update_pending_perm_card"] == 0 {
+		t.Fatalf("expected status/resolved/pending card updates, got %+v", msgs)
+	}
+
+	adapter.mu.RLock()
+	fsm := adapter.approvalFSMByRun[key]
+	binding := adapter.activeRuns[key]
+	adapter.mu.RUnlock()
+	if fsm.Version != 4 {
+		t.Fatalf("expected fsm version incremented, got %d", fsm.Version)
+	}
+	if fsm.ActiveRequestID != "req-2" {
+		t.Fatalf("expected queued request promoted, got %q", fsm.ActiveRequestID)
+	}
+	if fsm.Requests["req-1"].State != approvalRequestStateResolvedApproved {
+		t.Fatalf("expected first request resolved approved, got %+v", fsm.Requests["req-1"])
+	}
+	if fsm.Requests["req-2"].State != approvalRequestStateDisplayingPending {
+		t.Fatalf("expected second request promoted to displaying_pending, got %+v", fsm.Requests["req-2"])
+	}
+	if binding.ApprovalStatus != "pending" {
+		t.Fatalf("expected binding approval status stay pending after promotion, got %+v", binding)
+	}
+}
+
+func TestUntrackRunCleansDerivedState(t *testing.T) {
+	adapter := newTestAdapter(t)
+	sessionID := BuildSessionID("chat-untrack")
+	runID := BuildRunID("run-untrack")
+	key := runBindingKey(sessionID, runID)
+
+	adapter.mu.Lock()
+	adapter.activeRuns[key] = sessionBinding{
+		SessionID: sessionID,
+		RunID:     runID,
+		ChatID:    "chat-untrack",
+		CardID:    "status-card-1",
+	}
+	adapter.requestRuns["ask-1"] = key
+	adapter.userQuestionCards["ask-1"] = "ask-card-1"
+	adapter.pendingQuestions["ask-1"] = userQuestionEntry{RequestID: "ask-1"}
+	adapter.approvalRequestRunIndex[approvalRequestScopedKey(key, "perm-1")] = key
+	adapter.approvalRequestIDRunIndex["perm-1"] = key
+	adapter.approvalCardRunIndex["perm-card-1"] = key
+	adapter.approvalFSMByRun[key] = &approvalFSMState{
+		Generation: 1,
+		Requests: map[string]approvalRequestNode{
+			"perm-1": {RequestID: "perm-1"},
+		},
+	}
+	adapter.runPermissionCardHistory[key] = map[string]struct{}{"perm-card-1": {}}
+	adapter.lastProgressAt[key] = time.Now().UTC()
+	adapter.mu.Unlock()
+
+	adapter.untrackRun(sessionID, runID)
+
+	adapter.mu.RLock()
+	defer adapter.mu.RUnlock()
+	if _, ok := adapter.activeRuns[key]; ok {
+		t.Fatal("expected active run removed")
+	}
+	if _, ok := adapter.requestRuns["ask-1"]; ok {
+		t.Fatal("expected requestRuns cleaned")
+	}
+	if _, ok := adapter.userQuestionCards["ask-1"]; ok {
+		t.Fatal("expected userQuestionCards cleaned")
+	}
+	if _, ok := adapter.pendingQuestions["ask-1"]; ok {
+		t.Fatal("expected pendingQuestions cleaned")
+	}
+	if _, ok := adapter.approvalRequestRunIndex[approvalRequestScopedKey(key, "perm-1")]; ok {
+		t.Fatal("expected approvalRequestRunIndex cleaned")
+	}
+	if _, ok := adapter.approvalRequestIDRunIndex["perm-1"]; ok {
+		t.Fatal("expected approvalRequestIDRunIndex cleaned")
+	}
+	if _, ok := adapter.approvalCardRunIndex["perm-card-1"]; ok {
+		t.Fatal("expected approvalCardRunIndex cleaned")
+	}
+	if _, ok := adapter.approvalFSMByRun[key]; ok {
+		t.Fatal("expected approval FSM cleaned")
+	}
+	if _, ok := adapter.runPermissionCardHistory[key]; ok {
+		t.Fatal("expected permission card history cleaned")
+	}
+	if _, ok := adapter.lastProgressAt[key]; ok {
+		t.Fatal("expected progress throttle state cleaned")
+	}
+}
+
+func TestExtractProgressLineAndProgressHelpers(t *testing.T) {
+	cases := []struct {
+		name        string
+		runtimeType string
+		envelope    map[string]any
+		want        string
+	}{
+		{
+			name:        "phase changed",
+			runtimeType: "phase_changed",
+			envelope:    map[string]any{"payload": map[string]any{"to": "tool_call"}},
+			want:        "进入阶段：tool_call",
+		},
+		{
+			name:        "tool start",
+			runtimeType: "tool_start",
+			envelope:    map[string]any{"payload": map[string]any{"tool_name": "bash", "operation": "exec", "target": "pwd"}},
+			want:        "开始工具：bash · exec · pwd",
+		},
+		{
+			name:        "tool result status",
+			runtimeType: "tool_result",
+			envelope:    map[string]any{"payload": map[string]any{"tool_name": "bash", "status": "ok"}},
+			want:        "bash完成：ok",
+		},
+		{
+			name:        "tool result default name",
+			runtimeType: "tool_result",
+			envelope:    map[string]any{"payload": map[string]any{}},
+			want:        "工具完成",
+		},
+		{
+			name:        "permission requested default tool",
+			runtimeType: "permission_requested",
+			envelope:    map[string]any{"payload": map[string]any{}},
+			want:        "等待审批：工具操作",
+		},
+		{
+			name:        "permission rejected",
+			runtimeType: "permission_resolved",
+			envelope:    map[string]any{"payload": map[string]any{"decision": "reject"}},
+			want:        "审批结果：已拒绝",
+		},
+		{
+			name:        "permission approved",
+			runtimeType: "permission_resolved",
+			envelope:    map[string]any{"payload": map[string]any{"decision": "allow"}},
+			want:        "审批结果：已通过",
+		},
+		{
+			name:        "user question requested",
+			runtimeType: "user_question_requested",
+			envelope:    map[string]any{},
+			want:        "等待用户回答问题",
+		},
+		{
+			name:        "user question answered",
+			runtimeType: "user_question_answered",
+			envelope:    map[string]any{},
+			want:        "用户已回答问题",
+		},
+		{
+			name:        "user question skipped",
+			runtimeType: "user_question_skipped",
+			envelope:    map[string]any{},
+			want:        "用户已跳过问题",
+		},
+		{
+			name:        "run error",
+			runtimeType: "run_error",
+			envelope:    map[string]any{"payload": map[string]any{"message": "boom"}},
+			want:        "执行失败：boom",
+		},
+		{
+			name:        "run done",
+			runtimeType: "run_done",
+			envelope:    map[string]any{},
+			want:        "执行完成",
+		},
+		{
+			name:        "unknown",
+			runtimeType: "other",
+			envelope:    map[string]any{},
+			want:        "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractProgressLine(tc.runtimeType, tc.envelope); got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+
+	trail := appendProgressTrail([]string{"a"}, "a", 3)
+	if len(trail) != 1 || trail[0] != "a" {
+		t.Fatalf("expected duplicate line ignored, got %v", trail)
+	}
+	trail = appendProgressTrail(trail, "b", 2)
+	trail = appendProgressTrail(trail, "c", 2)
+	if len(trail) != 2 || trail[0] != "b" || trail[1] != "c" {
+		t.Fatalf("expected tail truncation, got %v", trail)
+	}
+	trail = appendProgressTrail(trail, " ", 2)
+	if len(trail) != 2 {
+		t.Fatalf("expected blank line ignored, got %v", trail)
+	}
+
+	if !equalStringSlices([]string{"a", "b"}, []string{"a", "b"}) {
+		t.Fatal("expected equal slices to match")
+	}
+	if equalStringSlices([]string{"a"}, []string{"b"}) {
+		t.Fatal("expected differing slices to not match")
+	}
+	if equalStringSlices([]string{"a"}, []string{"a", "b"}) {
+		t.Fatal("expected differing lengths to not match")
+	}
+}
+
 func newTestAdapter(t *testing.T) *Adapter {
 	t.Helper()
 	gateway := newFakeGatewayClient()
