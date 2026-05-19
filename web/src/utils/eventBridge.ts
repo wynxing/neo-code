@@ -17,9 +17,6 @@ import {
   type TokenUsage,
   type VerificationCompletedPayload,
   type VerificationFailedPayload,
-  type VerificationFinishedPayload,
-  type VerificationStageFinishedPayload,
-  type VerificationStartedPayload,
   type ToolDiffPayload,
 } from "@/api/protocol";
 import { type GatewayAPI } from "@/api/gateway";
@@ -41,12 +38,9 @@ import {
 
 type PayloadRecord = Record<string, unknown> | undefined;
 
-// 模块级缓存:最新 verification 消息 ID 与最近完成的 tool_call ID
-// 用于避免每次 verification stage / checkpoint 事件都全量扫描 messages 数组
-let _latestVerificationMsgId: string | undefined;
-let _latestDoneToolCallId: string | undefined;
+// 模块级缓存最新 verification 消息 ID，避免每次 verification stage 事件都全量扫描 messages 数组。
 
-// 模块级缓存最新的 checkpoint_id，用于工具占位条目关联后续端到端 diff。
+// 模块级缓存最新的 checkpoint_id，用于文件变更面板关联后续端到端 diff。
 let _latestCheckpointId: string | undefined;
 let _latestRunDiffRequestId = 0;
 let _latestRestoreSyncRequestId = 0;
@@ -63,8 +57,6 @@ const CHECKPOINT_REASON_PRE_RESTORE_GUARD = "pre_restore_guard";
 /** 重置模块级游标 —— 在截断聊天历史 / 切换会话等场景调用，避免后续事件挂到已被移除的消息上 */
 export function resetEventBridgeCursors() {
   const keepCheckpointBaseline = useUIStore.getState().isRestoringCheckpoint;
-  _latestVerificationMsgId = undefined;
-  _latestDoneToolCallId = undefined;
   _latestCheckpointId = keepCheckpointBaseline
     ? _latestCheckpointId
     : undefined;
@@ -162,6 +154,7 @@ function _upsertFileChange(
 ) {
   const path = normalizeFilePath(rawPath);
   if (!path) return;
+  useUIStore.getState().clearCheckpointRollbackUndo();
   const checkpointID = resolveRollbackCheckpointID(path);
   const existing = useUIStore
     .getState()
@@ -395,14 +388,14 @@ function _refreshRunFileChanges(
             change.rollback_checkpoint_id ?? change.checkpoint_id,
           ]),
       );
-      useUIStore
-        .getState()
-        .replaceFileChanges(
-          _fileChangesFromCheckpointDiff(
-            result.payload,
-            existingCheckpointByPath,
-          ),
-        );
+      const nextFileChanges = _fileChangesFromCheckpointDiff(
+        result.payload,
+        existingCheckpointByPath,
+      );
+      if (nextFileChanges.length > 0) {
+        useUIStore.getState().clearCheckpointRollbackUndo();
+      }
+      useUIStore.getState().replaceFileChanges(nextFileChanges);
     })
     .catch((error) => {
       console.warn("[eventBridge] checkpoint.diff run scope failed:", error);
@@ -410,23 +403,30 @@ function _refreshRunFileChanges(
 }
 
 // applyBaselineCheckpointRestoreEvent 只同步文件级 baseline 回退，不刷新会话消息或 insight。
-function applyBaselineCheckpointRestoreEvent(payload: CheckpointRestoredPayload) {
+function applyBaselineCheckpointRestoreEvent(
+  payload: CheckpointRestoredPayload,
+): boolean {
   const restoredPaths = new Set(
     (payload.paths ?? []).map(normalizeFilePath).filter(Boolean),
   );
   _latestRunDiffRequestId += 1;
   useUIStore.getState().setRestoringCheckpoint(false);
+  useUIStore.getState().clearCheckpointRollbackUndo();
   if (restoredPaths.size === 0) {
-    return;
+    return false;
   }
   for (const path of restoredPaths) {
     _firstTouchRollbackCheckpointByPath.delete(path);
   }
-  useUIStore.setState((state) => ({
-    fileChanges: state.fileChanges.filter(
+  let removedAllChanges = false;
+  useUIStore.setState((state) => {
+    const remaining = state.fileChanges.filter(
       (change) => !restoredPaths.has(normalizeFilePath(change.path)),
-    ),
-  }));
+    );
+    removedAllChanges = state.fileChanges.length > 0 && remaining.length === 0;
+    return { fileChanges: remaining };
+  });
+  return removedAllChanges;
 }
 
 // refreshSessionAfterCheckpointRestoreEvent 仅在当前会话收到 restore/undo 事件时刷新会话与文件变更视图。
@@ -533,6 +533,9 @@ function normalizeUserQuestionRequestedPayload(
 }
 
 const CRITICAL_EVENTS = new Set<string>([EventType.Error]);
+const SESSION_AGNOSTIC_EVENTS = new Set<string>([
+  EventType.Error,
+]);
 
 function strField(payload: unknown, key: string): string {
   return ((payload as PayloadRecord)?.[key] as string) ?? "";
@@ -627,12 +630,24 @@ export function handleGatewayEvent(
     (innerEnvelope?.runtime_event_type as string | undefined) ??
     (payload.event_type as string | undefined);
   if (!eventType) return;
+  const frameSessionId = (frame.session_id || "").trim();
+  const frameRunId = frame.run_id;
 
   // Discard non-critical events during workspace transition to avoid stale data
   // Only Error events are allowed through during transition
   if (
     useChatStore.getState().isTransitioning &&
     !CRITICAL_EVENTS.has(eventType)
+  ) {
+    return;
+  }
+
+  const currentSessionId = useSessionStore.getState().currentSessionId.trim();
+  if (
+    frameSessionId &&
+    currentSessionId &&
+    frameSessionId !== currentSessionId &&
+    !SESSION_AGNOSTIC_EVENTS.has(eventType)
   ) {
     return;
   }
@@ -644,20 +659,7 @@ export function handleGatewayEvent(
   const gwStore = useGatewayStore.getState();
   const insightStore = useRuntimeInsightStore.getState();
 
-  const frameSessionId = frame.session_id;
-  const frameRunId = frame.run_id;
-
   /** 更新最新 verification 消息的 data 为 insightStore 当前最后一条 record */
-  function syncLatestVerificationToChat() {
-    const history = useRuntimeInsightStore.getState().verificationHistory;
-    if (_latestVerificationMsgId && history.length > 0) {
-      chatStore.updateVerificationMessage(
-        _latestVerificationMsgId,
-        history[history.length - 1],
-      );
-    }
-  }
-
   switch (eventType) {
     case EventType.ThinkingDelta: {
       const text = eventPayload as string | undefined;
@@ -733,8 +735,7 @@ export function handleGatewayEvent(
     }
 
     case EventType.ToolResult: {
-      const tcId = settleToolResultMessage(eventPayload);
-      _latestDoneToolCallId = tcId;
+      settleToolResultMessage(eventPayload);
       break;
     }
 
@@ -994,61 +995,10 @@ export function handleGatewayEvent(
       break;
     }
 
-    case EventType.VerificationStarted: {
-      const payload = eventPayload as VerificationStartedPayload | undefined;
-      if (!payload) break;
-      // completion gate 已拦截（典型场景: pending_todo），verifier 不会真正运行；
-      // 跳过创建 verification chat message，避免出现 "0/1 passed" 误导。
-      // 该状态由下游 AcceptanceDecided → AcceptanceMessage 完整呈现。
-      if (payload.completion_passed === false) {
-        break;
-      }
-      const recordId = insightStore.startVerification(payload);
-      const history = useRuntimeInsightStore.getState().verificationHistory;
-      const record =
-        history.length > 0 ? history[history.length - 1] : undefined;
-      if (record) {
-        const msgId = `msg_${Date.now()}_verify_${recordId.slice(0, 8)}`;
-        _latestVerificationMsgId = msgId;
-        chatStore.addMessage({
-          id: msgId,
-          role: "assistant",
-          type: "verification",
-          content: "",
-          verificationData: record,
-          timestamp: Date.now(),
-        });
-      }
-      chatStore.setPhase("verification");
-      uiStore.showToast("Verification started", "info");
-      break;
-    }
-
-    case EventType.VerificationStageFinished: {
-      const payload = eventPayload as
-        | VerificationStageFinishedPayload
-        | undefined;
-      if (payload) {
-        insightStore.upsertVerificationStage(payload);
-        syncLatestVerificationToChat();
-      }
-      break;
-    }
-
-    case EventType.VerificationFinished: {
-      const payload = eventPayload as VerificationFinishedPayload | undefined;
-      if (payload) {
-        insightStore.finishVerification(payload);
-        syncLatestVerificationToChat();
-      }
-      break;
-    }
-
     case EventType.VerificationCompleted: {
       const payload = eventPayload as VerificationCompletedPayload | undefined;
       if (payload) {
         insightStore.completeVerification(payload);
-        syncLatestVerificationToChat();
       }
       break;
     }
@@ -1057,7 +1007,6 @@ export function handleGatewayEvent(
       const payload = eventPayload as VerificationFailedPayload | undefined;
       if (payload) {
         insightStore.failVerification(payload);
-        syncLatestVerificationToChat();
       }
       uiStore.showToast(
         strField(eventPayload, "error_class") || "Verification failed",
@@ -1087,12 +1036,6 @@ export function handleGatewayEvent(
       const payload = eventPayload as CheckpointCreatedPayload | undefined;
       if (payload) {
         insightStore.addCheckpointEvent(payload);
-        if (_latestDoneToolCallId) {
-          chatStore.attachCheckpointToToolCall(
-            _latestDoneToolCallId,
-            payload.checkpoint_id,
-          );
-        }
         if (payload.reason !== CHECKPOINT_REASON_PRE_RESTORE_GUARD) {
           _latestCheckpointId = payload.checkpoint_id;
         }
@@ -1131,11 +1074,20 @@ export function handleGatewayEvent(
           payload.session_id === useSessionStore.getState().currentSessionId
         ) {
           if (payload.mode === "baseline") {
-            applyBaselineCheckpointRestoreEvent(payload);
+            const removedAllChanges =
+              applyBaselineCheckpointRestoreEvent(payload);
+            if (removedAllChanges && payload.guard_checkpoint_id?.trim()) {
+              useUIStore.getState().setCheckpointRollbackUndo({
+                sessionId: payload.session_id,
+                checkpointId: payload.checkpoint_id,
+                guardCheckpointId: payload.guard_checkpoint_id,
+                paths: payload.paths ?? [],
+              });
+            }
             uiStore.showToast("File rollback completed", "success");
             break;
           }
-          chatStore.markAllCheckpointsRestored();
+          useUIStore.getState().clearCheckpointRollbackUndo();
           refreshSessionAfterCheckpointRestoreEvent(
             gatewayAPI,
             payload.session_id,
@@ -1154,7 +1106,17 @@ export function handleGatewayEvent(
         if (
           payload.session_id === useSessionStore.getState().currentSessionId
         ) {
-          chatStore.markAllCheckpointsAvailable();
+          const rollbackUndo = useUIStore.getState().checkpointRollbackUndo;
+          useUIStore.getState().clearCheckpointRollbackUndo();
+          useUIStore.getState().clearFileChanges();
+          useUIStore.getState().setRestoringCheckpoint(false);
+          if (
+            rollbackUndo?.sessionId === payload.session_id &&
+            rollbackUndo.guardCheckpointId === payload.guard_checkpoint_id
+          ) {
+            uiStore.showToast("Rollback undo completed", "success");
+            break;
+          }
           refreshSessionAfterCheckpointRestoreEvent(
             gatewayAPI,
             payload.session_id,

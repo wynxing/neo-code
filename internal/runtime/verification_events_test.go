@@ -6,7 +6,6 @@ import (
 
 	"neo-code/internal/runtime/acceptgate"
 	"neo-code/internal/runtime/controlplane"
-	runtimeverify "neo-code/internal/runtime/verify"
 	agentsession "neo-code/internal/session"
 )
 
@@ -17,7 +16,7 @@ func TestEmitVerificationLifecycleEvents(t *testing.T) {
 	state := newRunState("run-verification-events", agentsession.New("verification-events"))
 	report := acceptgate.Report{
 		Outcome:    acceptgate.OutcomeFailed,
-		StopReason: controlplane.StopReasonAcceptCheckFailed,
+		StopReason: controlplane.StopReasonVerificationFailed,
 		Results: []acceptgate.CheckResult{
 			{Name: "required_todo_failed", Passed: false, Reason: "required todo failed: t1"},
 			{Name: "output_only", Passed: true},
@@ -51,7 +50,7 @@ func TestEmitVerificationLifecycleEvents(t *testing.T) {
 	if !ok {
 		t.Fatalf("stage payload type = %T", events[1].Payload)
 	}
-	if stage.Name != "required_todo_failed" || stage.Status != runtimeverify.VerificationFail {
+	if stage.Name != "required_todo_failed" || stage.Status != "fail" {
 		t.Fatalf("unexpected stage payload: %+v", stage)
 	}
 	if stage.ErrorClass == "" {
@@ -65,10 +64,10 @@ func TestEmitVerificationLifecycleEvents(t *testing.T) {
 	if finished.AcceptanceStatus != string(acceptgate.OutcomeFailed) {
 		t.Fatalf("AcceptanceStatus = %q", finished.AcceptanceStatus)
 	}
-	if finished.StopReason != controlplane.StopReasonAcceptCheckFailed {
+	if finished.StopReason != controlplane.StopReasonVerificationFailed {
 		t.Fatalf("StopReason = %q", finished.StopReason)
 	}
-	if finished.ErrorClass != runtimeverify.ErrorClassUnknown {
+	if finished.ErrorClass != "unknown" {
 		t.Fatalf("ErrorClass = %q, want unknown", finished.ErrorClass)
 	}
 }

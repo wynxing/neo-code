@@ -21,6 +21,7 @@ function createMockGatewayAPI(overrides: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
+  vi.restoreAllMocks();
   resetEventBridgeCursors();
   useChatStore.setState({
     messages: [],
@@ -47,6 +48,7 @@ beforeEach(() => {
     toasts: [],
     fileChanges: [],
     isRestoringCheckpoint: false,
+    checkpointRollbackUndo: null,
   } as any);
 });
 
@@ -99,6 +101,142 @@ describe("eventBridge", () => {
     );
 
     expect(useChatStore.getState().messages[0].content).toBe("Hello");
+  });
+
+  it("drops stale session events after session switch for tool and chunk updates", () => {
+    const api = createMockGatewayAPI();
+    useSessionStore.setState({ currentSessionId: "sess-new" } as any);
+
+    handleGatewayEvent(
+      {
+        type: EventType.ToolStart,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.ToolStart,
+            payload: {
+              name: "filesystem_write_file",
+              id: "tc-old",
+              arguments: '{"path":"stale.txt"}',
+            },
+          },
+        },
+        session_id: "sess-old",
+        run_id: "run-old",
+      },
+      api,
+    );
+
+    handleGatewayEvent(
+      {
+        type: EventType.ToolDiff,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.ToolDiff,
+            payload: {
+              tool_name: "filesystem_write_file",
+              file_path: "stale.txt",
+              diff: "--- a/stale.txt\n+++ b/stale.txt\n@@ -0,0 +1 @@\n+old\n",
+              was_new: true,
+            },
+          },
+        },
+        session_id: "sess-old",
+        run_id: "run-old",
+      },
+      api,
+    );
+
+    handleGatewayEvent(
+      {
+        type: EventType.AgentChunk,
+        payload: {
+          payload: { runtime_event_type: EventType.AgentChunk, payload: "stale chunk" },
+        },
+        session_id: "sess-old",
+        run_id: "run-old",
+      },
+      api,
+    );
+
+    expect(useChatStore.getState().messages).toHaveLength(0);
+    expect(useUIStore.getState().fileChanges).toHaveLength(0);
+  });
+
+  it("drops stale InputNormalized events after session switch", () => {
+    const clearFileChangesSpy = vi.spyOn(
+      useUIStore.getState(),
+      "clearFileChanges",
+    );
+    const setCurrentRunIdSpy = vi.spyOn(
+      useGatewayStore.getState(),
+      "setCurrentRunId",
+    );
+    const listSessions = vi.fn().mockResolvedValue({ payload: { sessions: [] } });
+    const api = createMockGatewayAPI({ listSessions });
+    useSessionStore.setState({ currentSessionId: "sess-new" } as any);
+    useGatewayStore.setState({ currentRunId: "run-current" } as any);
+
+    handleGatewayEvent(
+      {
+        type: EventType.InputNormalized,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.InputNormalized,
+            payload: {
+              session_id: "sess-old",
+              run_id: "run-old",
+            },
+          },
+        },
+        session_id: "sess-old",
+        run_id: "run-old",
+      },
+      api,
+    );
+
+    expect(useSessionStore.getState().currentSessionId).toBe("sess-new");
+    expect(useGatewayStore.getState().currentRunId).toBe("run-current");
+    expect(setCurrentRunIdSpy).not.toHaveBeenCalled();
+    expect(clearFileChangesSpy).not.toHaveBeenCalled();
+    expect(listSessions).not.toHaveBeenCalled();
+  });
+
+  it("accepts InputNormalized when there is no current session yet", async () => {
+    const clearFileChangesSpy = vi.spyOn(
+      useUIStore.getState(),
+      "clearFileChanges",
+    );
+    const setCurrentRunIdSpy = vi.spyOn(
+      useGatewayStore.getState(),
+      "setCurrentRunId",
+    );
+    const listSessions = vi.fn().mockResolvedValue({ payload: { sessions: [] } });
+    const api = createMockGatewayAPI({ listSessions });
+
+    handleGatewayEvent(
+      {
+        type: EventType.InputNormalized,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.InputNormalized,
+            payload: {
+              session_id: "sess-first",
+              run_id: "run-first",
+            },
+          },
+        },
+        session_id: "sess-first",
+        run_id: "run-first",
+      },
+      api,
+    );
+
+    expect(useSessionStore.getState().currentSessionId).toBe("sess-first");
+    expect(setCurrentRunIdSpy).toHaveBeenCalledWith("run-first");
+    expect(clearFileChangesSpy).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(listSessions).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("AgentDone finalizes message from parts array", () => {
@@ -250,6 +388,49 @@ describe("eventBridge", () => {
     expect(useChatStore.getState().pendingUserQuestion).toBeNull();
   });
 
+  it("PermissionRequested and PermissionResolved update permission requests", () => {
+    const api = createMockGatewayAPI();
+    handleGatewayEvent(
+      {
+        type: EventType.PermissionRequested,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.PermissionRequested,
+            payload: {
+              request_id: "perm-1",
+              tool_call_id: "tc-1",
+              tool_name: "bash",
+              action_type: "run",
+            },
+          },
+        },
+        session_id: "sess-1",
+        run_id: "run-1",
+      },
+      api,
+    );
+
+    expect(useChatStore.getState().permissionRequests).toHaveLength(1);
+    expect(useChatStore.getState().permissionRequests[0].request_id).toBe("perm-1");
+
+    handleGatewayEvent(
+      {
+        type: EventType.PermissionResolved,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.PermissionResolved,
+            payload: { request_id: "perm-1" },
+          },
+        },
+        session_id: "sess-1",
+        run_id: "run-1",
+      },
+      api,
+    );
+
+    expect(useChatStore.getState().permissionRequests).toHaveLength(0);
+  });
+
   it("ToolStart adds a tool call message", () => {
     const api = createMockGatewayAPI();
     handleGatewayEvent(
@@ -302,6 +483,45 @@ describe("eventBridge", () => {
       .getState()
       .fileChanges.find((entry) => entry.path === "pending.txt");
     expect(change?.status).toBe("pending");
+  });
+
+  it("ToolStart file placeholders clear stale rollback undo state", () => {
+    const api = createMockGatewayAPI();
+    useUIStore.setState({
+      checkpointRollbackUndo: {
+        sessionId: "sess-1",
+        checkpointId: "cp-rollback",
+        guardCheckpointId: "guard-rollback",
+        paths: ["old.txt"],
+        status: "idle",
+      },
+    } as any);
+
+    handleGatewayEvent(
+      {
+        type: EventType.ToolStart,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.ToolStart,
+            payload: {
+              name: "filesystem_write_file",
+              id: "tc-new-change",
+              arguments: '{"path":"new-change.txt"}',
+            },
+          },
+        },
+        session_id: "sess-1",
+        run_id: "run-1",
+      },
+      api,
+    );
+
+    expect(useUIStore.getState().checkpointRollbackUndo).toBeNull();
+    expect(
+      useUIStore
+        .getState()
+        .fileChanges.some((entry) => entry.path === "new-change.txt"),
+    ).toBe(true);
   });
 
   it("ToolResult updates an existing tool call message", () => {
@@ -512,6 +732,40 @@ describe("eventBridge", () => {
     expect(useChatStore.getState().messages[0].toolStatus).toBe("running");
   });
 
+  it("Error shows toast, resets generation, and marks running tool calls as error", () => {
+    const api = createMockGatewayAPI();
+    useChatStore.getState().addMessage({
+      id: "tool-running-error",
+      role: "tool",
+      type: "tool_call",
+      content: "",
+      toolName: "bash",
+      toolCallId: "tc-error",
+      toolStatus: "running",
+      timestamp: Date.now(),
+    });
+    useChatStore.getState().setGenerating(true);
+
+    handleGatewayEvent(
+      {
+        type: EventType.Error,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.Error,
+            payload: "boom",
+          },
+        },
+        session_id: "sess-1",
+        run_id: "run-1",
+      },
+      api,
+    );
+
+    expect(useChatStore.getState().isGenerating).toBe(false);
+    expect(useChatStore.getState().messages[0].toolStatus).toBe("error");
+    expect(useUIStore.getState().toasts.at(-1)?.message).toBe("boom");
+  });
+
   it("BudgetChecked updates runtime insight budget state", () => {
     const api = createMockGatewayAPI();
     handleGatewayEvent(
@@ -539,6 +793,70 @@ describe("eventBridge", () => {
       "allow",
     );
     expect(useRuntimeInsightStore.getState().budgetUsageRatio).toBe(0.8);
+  });
+
+  it("TokenUsage, BudgetEstimateFailed, and LedgerReconciled update store snapshots", () => {
+    const api = createMockGatewayAPI();
+
+    handleGatewayEvent(
+      {
+        type: EventType.TokenUsage,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.TokenUsage,
+            payload: { input_tokens: 3, output_tokens: 5, session_input_tokens: 3, session_output_tokens: 5 },
+          },
+        },
+        session_id: "sess-1",
+        run_id: "run-1",
+      },
+      api,
+    );
+    expect(useChatStore.getState().tokenUsage?.output_tokens).toBe(5);
+
+    handleGatewayEvent(
+      {
+        type: EventType.BudgetEstimateFailed,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.BudgetEstimateFailed,
+            payload: { attempt_seq: 1, request_hash: "hash-1", message: "no price rule" },
+          },
+        },
+        session_id: "sess-1",
+        run_id: "run-1",
+      },
+      api,
+    );
+    expect(useRuntimeInsightStore.getState().budgetEstimateFailed?.message).toBe(
+      "no price rule",
+    );
+
+    handleGatewayEvent(
+      {
+        type: EventType.LedgerReconciled,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.LedgerReconciled,
+            payload: {
+              attempt_seq: 1,
+              request_hash: "hash-1",
+              input_tokens: 3,
+              input_source: "observed",
+              output_tokens: 5,
+              output_source: "observed",
+              has_unknown_usage: false,
+            },
+          },
+        },
+        session_id: "sess-1",
+        run_id: "run-1",
+      },
+      api,
+    );
+    expect(useRuntimeInsightStore.getState().ledgerReconciled?.output_tokens).toBe(
+      5,
+    );
   });
 
   it("CompactStart sets persistent compact state without a toast", () => {
@@ -697,28 +1015,6 @@ describe("eventBridge", () => {
     );
   });
 
-  it("VerificationStageFinished upserts verifier status", () => {
-    const api = createMockGatewayAPI();
-    handleGatewayEvent(
-      {
-        type: EventType.VerificationStageFinished,
-        payload: {
-          payload: {
-            runtime_event_type: EventType.VerificationStageFinished,
-            payload: { name: "test", status: "passed", summary: "ok" },
-          },
-        },
-        session_id: "sess-1",
-        run_id: "run-1",
-      },
-      api,
-    );
-
-    expect(
-      useRuntimeInsightStore.getState().verificationStages.test.status,
-    ).toBe("passed");
-  });
-
   it("AcceptanceDecided stores acceptance decision", () => {
     const api = createMockGatewayAPI();
     handleGatewayEvent(
@@ -739,6 +1035,53 @@ describe("eventBridge", () => {
     expect(useRuntimeInsightStore.getState().acceptanceDecision?.status).toBe(
       "accepted",
     );
+  });
+
+  it("VerificationCompleted stores final verification outcome", () => {
+    const api = createMockGatewayAPI();
+    handleGatewayEvent(
+      {
+        type: EventType.VerificationCompleted,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.VerificationCompleted,
+            payload: { stop_reason: "accepted" },
+          },
+        },
+        session_id: "sess-1",
+        run_id: "run-1",
+      },
+      api,
+    );
+
+    expect(
+      useRuntimeInsightStore.getState().verificationCompleted?.stop_reason,
+    ).toBe("accepted");
+    expect(useChatStore.getState().messages).toHaveLength(0);
+  });
+
+  it("VerificationFailed stores final verification failure without creating verification chat message", () => {
+    const api = createMockGatewayAPI();
+    handleGatewayEvent(
+      {
+        type: EventType.VerificationFailed,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.VerificationFailed,
+            payload: { stop_reason: "error", error_class: "TestError" },
+          },
+        },
+        session_id: "sess-1",
+        run_id: "run-1",
+      },
+      api,
+    );
+
+    expect(
+      useRuntimeInsightStore.getState().verificationFailed?.error_class,
+    ).toBe("TestError");
+    expect(useUIStore.getState().toasts.at(-1)?.message).toBe("TestError");
+    expect(useChatStore.getState().messages).toHaveLength(0);
   });
 
   it("TodoSnapshotUpdated stores todo snapshot", () => {
@@ -948,6 +1291,31 @@ describe("eventBridge", () => {
     expect(useUIStore.getState().toasts).toHaveLength(0);
   });
 
+  it("TodoConflict surfaces a toast for non-recoverable reasons", () => {
+    const api = createMockGatewayAPI();
+    handleGatewayEvent(
+      {
+        type: EventType.TodoConflict,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.TodoConflict,
+            payload: { action: "update", reason: "server_desync" },
+          },
+        },
+        session_id: "sess-1",
+        run_id: "run-1",
+      },
+      api,
+    );
+
+    expect(useRuntimeInsightStore.getState().todoConflict?.reason).toBe(
+      "server_desync",
+    );
+    expect(useUIStore.getState().toasts.at(-1)?.message).toBe(
+      "Todo conflict: server_desync",
+    );
+  });
+
   it("TodoConflict invalid_arguments shows info toast", () => {
     const api = createMockGatewayAPI();
     handleGatewayEvent(
@@ -1048,6 +1416,7 @@ describe("eventBridge", () => {
 
     expect(loadSession).toHaveBeenCalledWith("sess-1");
     expect(useUIStore.getState().fileChanges).toHaveLength(0);
+    expect(useUIStore.getState().checkpointRollbackUndo).toBeNull();
   });
 
   it("baseline CheckpointRestored removes only restored file changes without reloading the session", async () => {
@@ -1089,7 +1458,7 @@ describe("eventBridge", () => {
             payload: {
               checkpoint_id: "cp1",
               session_id: "sess-1",
-              guard_checkpoint_id: "",
+              guard_checkpoint_id: "guard-baseline-1",
               mode: "baseline",
               paths: ["./src/a.txt"],
             },
@@ -1104,9 +1473,10 @@ describe("eventBridge", () => {
 
     expect(loadSession).not.toHaveBeenCalled();
     expect(useUIStore.getState().isRestoringCheckpoint).toBe(false);
-    expect(useUIStore.getState().fileChanges.map((entry) => entry.path)).toEqual(
-      ["src/b.txt"],
-    );
+    expect(useUIStore.getState().checkpointRollbackUndo).toBeNull();
+    expect(
+      useUIStore.getState().fileChanges.map((entry) => entry.path),
+    ).toEqual(["src/b.txt"]);
   });
 
   it("baseline CheckpointRestored removes all paths from rollback all events", async () => {
@@ -1142,7 +1512,7 @@ describe("eventBridge", () => {
             payload: {
               checkpoint_id: "cp1",
               session_id: "sess-1",
-              guard_checkpoint_id: "",
+              guard_checkpoint_id: "guard-baseline-all",
               mode: "baseline",
               paths: ["src/a.txt", "src/b.txt"],
             },
@@ -1157,6 +1527,13 @@ describe("eventBridge", () => {
 
     expect(loadSession).not.toHaveBeenCalled();
     expect(useUIStore.getState().fileChanges).toHaveLength(0);
+    expect(useUIStore.getState().checkpointRollbackUndo).toMatchObject({
+      sessionId: "sess-1",
+      checkpointId: "cp1",
+      guardCheckpointId: "guard-baseline-all",
+      paths: ["src/a.txt", "src/b.txt"],
+      status: "idle",
+    });
   });
 
   it("baseline CheckpointRestored invalidates in-flight run-scoped file change refreshes", async () => {
@@ -1399,17 +1776,46 @@ describe("eventBridge", () => {
 
     expect(loadSession).toHaveBeenCalledWith("sess-1");
     expect(useUIStore.getState().fileChanges).toHaveLength(0);
+    expect(useUIStore.getState().checkpointRollbackUndo).toBeNull();
+    expect(useUIStore.getState().toasts.at(-1)).toMatchObject({
+      message: "Checkpoint restore undone",
+      type: "success",
+    });
   });
 
-  it("VerificationStarted creates a verification ChatMessage", () => {
-    const api = createMockGatewayAPI();
+  it("CheckpointUndoRestore clears rollback undo state without reloading session", async () => {
+    const loadSession = vi.fn();
+    const api = createMockGatewayAPI({ loadSession });
+    useSessionStore.setState({ currentSessionId: "sess-1" } as any);
+    useUIStore.setState({
+      checkpointRollbackUndo: {
+        sessionId: "sess-1",
+        checkpointId: "cp-rollback",
+        guardCheckpointId: "guard-rollback",
+        paths: ["src/a.txt"],
+        status: "undoing",
+      },
+      fileChanges: [
+        {
+          id: "fc-1",
+          path: "src/a.txt",
+          status: "modified",
+          additions: 1,
+          deletions: 0,
+        },
+      ],
+    } as any);
+
     handleGatewayEvent(
       {
-        type: EventType.VerificationStarted,
+        type: EventType.CheckpointUndoRestore,
         payload: {
           payload: {
-            runtime_event_type: EventType.VerificationStarted,
-            payload: { completion_passed: true },
+            runtime_event_type: EventType.CheckpointUndoRestore,
+            payload: {
+              session_id: "sess-1",
+              guard_checkpoint_id: "guard-rollback",
+            },
           },
         },
         session_id: "sess-1",
@@ -1417,64 +1823,56 @@ describe("eventBridge", () => {
       },
       api,
     );
+    await Promise.resolve();
 
-    const verifyMsg = useChatStore
-      .getState()
-      .messages.find((m) => m.type === "verification");
-    expect(verifyMsg).toBeDefined();
-    expect(verifyMsg?.verificationData?.status).toBe("running");
-    expect(useRuntimeInsightStore.getState().verificationHistory).toHaveLength(
-      1,
-    );
+    expect(loadSession).not.toHaveBeenCalled();
+    expect(useUIStore.getState().checkpointRollbackUndo).toBeNull();
+    expect(useUIStore.getState().fileChanges).toHaveLength(0);
+    expect(useUIStore.getState().toasts.at(-1)).toMatchObject({
+      message: "Rollback undo completed",
+      type: "success",
+    });
   });
 
-  it("VerificationStageFinished updates the verification message", () => {
-    const api = createMockGatewayAPI();
-    handleGatewayEvent(
-      {
-        type: EventType.VerificationStarted,
-        payload: {
-          payload: {
-            runtime_event_type: EventType.VerificationStarted,
-            payload: { completion_passed: true },
-          },
-        },
-        session_id: "sess-1",
-        run_id: "run-1",
+  it("CheckpointUndoRestore reloads session when rollback undo guard id is stale", async () => {
+    const loadSession = vi.fn(async () => ({
+      payload: {
+        id: "sess-1",
+        agent_mode: "build",
+        messages: [{ role: "assistant", content: "after normal undo" }],
       },
-      api,
-    );
-    handleGatewayEvent(
-      {
-        type: EventType.VerificationStageFinished,
-        payload: {
-          payload: {
-            runtime_event_type: EventType.VerificationStageFinished,
-            payload: { name: "lint", status: "passed", summary: "all good" },
-          },
-        },
-        session_id: "sess-1",
-        run_id: "run-1",
+    }));
+    const api = createMockGatewayAPI({ loadSession });
+    useSessionStore.setState({ currentSessionId: "sess-1" } as any);
+    useUIStore.setState({
+      checkpointRollbackUndo: {
+        sessionId: "sess-1",
+        checkpointId: "cp-rollback",
+        guardCheckpointId: "guard-stale",
+        paths: ["src/a.txt"],
+        status: "idle",
       },
-      api,
-    );
+      fileChanges: [
+        {
+          id: "fc-1",
+          path: "src/a.txt",
+          status: "modified",
+          additions: 1,
+          deletions: 0,
+        },
+      ],
+    } as any);
 
-    const verifyMsg = useChatStore
-      .getState()
-      .messages.find((m) => m.type === "verification");
-    expect(verifyMsg?.verificationData?.stages.lint.status).toBe("passed");
-    expect(verifyMsg?.verificationData?.stages.lint.summary).toBe("all good");
-  });
-
-  it("VerificationFinished updates history and chat message", () => {
-    const api = createMockGatewayAPI();
     handleGatewayEvent(
       {
-        type: EventType.VerificationStarted,
+        type: EventType.CheckpointUndoRestore,
         payload: {
           payload: {
-            runtime_event_type: EventType.VerificationStarted,
-            payload: { completion_passed: true },
+            runtime_event_type: EventType.CheckpointUndoRestore,
+            payload: {
+              session_id: "sess-1",
+              guard_checkpoint_id: "guard-normal",
+            },
           },
         },
         session_id: "sess-1",
@@ -1482,28 +1880,16 @@ describe("eventBridge", () => {
       },
       api,
     );
-    handleGatewayEvent(
-      {
-        type: EventType.VerificationFinished,
-        payload: {
-          payload: {
-            runtime_event_type: EventType.VerificationFinished,
-            payload: { acceptance_status: "accepted" },
-          },
-        },
-        session_id: "sess-1",
-        run_id: "run-1",
-      },
-      api,
-    );
+    await Promise.resolve();
+    await Promise.resolve();
 
-    const verifyMsg = useChatStore
-      .getState()
-      .messages.find((m) => m.type === "verification");
-    expect(verifyMsg?.verificationData?.status).toBe("finished");
-    expect(
-      useRuntimeInsightStore.getState().verificationHistory[0].status,
-    ).toBe("finished");
+    expect(loadSession).toHaveBeenCalledWith("sess-1");
+    expect(useUIStore.getState().checkpointRollbackUndo).toBeNull();
+    expect(useUIStore.getState().fileChanges).toHaveLength(0);
+    expect(useUIStore.getState().toasts.at(-1)).toMatchObject({
+      message: "Checkpoint restore undone",
+      type: "success",
+    });
   });
 
   it("AcceptanceDecided creates an acceptance ChatMessage", () => {
@@ -1534,9 +1920,42 @@ describe("eventBridge", () => {
     );
   });
 
-  it("CheckpointCreated attaches checkpointId to the latest done tool_call", () => {
+  it("Skill and asset events surface user-facing toasts", () => {
     const api = createMockGatewayAPI();
-    // 先创建并完成一个 tool call
+    for (const [eventType, payload] of [
+      [EventType.SkillActivated, { skill_id: "skill-a" }],
+      [EventType.SkillDeactivated, { skill_id: "skill-a" }],
+      [EventType.SkillMissing, { skill_id: "skill-b" }],
+      [EventType.AssetSaved, { path: "/tmp/result.txt" }],
+      [EventType.AssetSaveFailed, { path: "/tmp/result.txt" }],
+    ] as const) {
+      handleGatewayEvent(
+        {
+          type: eventType,
+          payload: {
+            payload: {
+              runtime_event_type: eventType,
+              payload,
+            },
+          },
+          session_id: "sess-1",
+          run_id: "run-1",
+        },
+        api,
+      );
+    }
+
+    const toastMessages = useUIStore.getState().toasts.map((toast) => toast.message);
+    expect(toastMessages).toContain("Skill activated: skill-a");
+    expect(toastMessages).toContain("Skill deactivated: skill-a");
+    expect(toastMessages).toContain("Skill unavailable: skill-b");
+    expect(toastMessages).toContain("File saved: /tmp/result.txt");
+    expect(toastMessages).toContain("Failed to save file: /tmp/result.txt");
+  });
+
+  it("CheckpointCreated only records runtime insight and does not decorate completed tool calls", () => {
+    const api = createMockGatewayAPI();
+
     handleGatewayEvent(
       {
         type: EventType.ToolStart,
@@ -1565,7 +1984,6 @@ describe("eventBridge", () => {
       },
       api,
     );
-    // 然后创建 checkpoint
     handleGatewayEvent(
       {
         type: EventType.CheckpointCreated,
@@ -1590,8 +2008,12 @@ describe("eventBridge", () => {
     const toolMsg = useChatStore
       .getState()
       .messages.find((m) => m.type === "tool_call");
-    expect(toolMsg?.checkpointId).toBe("cp1");
-    expect(toolMsg?.checkpointStatus).toBe("available");
+    expect((toolMsg as any)?.checkpointId).toBeUndefined();
+    expect((toolMsg as any)?.checkpointStatus).toBeUndefined();
+    expect(useRuntimeInsightStore.getState().checkpointEvents[0]).toMatchObject({
+      checkpoint_id: "cp1",
+      reason: "pre_write",
+    });
   });
 
   it("CheckpointCreated with pre_restore_guard does not override latest rollback baseline", () => {
@@ -1916,6 +2338,107 @@ describe("eventBridge", () => {
       "D",
       "line 12",
     ]);
+  });
+
+  it("run-scoped checkpoint diff clears stale rollback undo when new changes are returned", async () => {
+    const checkpointDiff = vi.fn(async () => ({
+      payload: {
+        checkpoint_id: "cp-new",
+        files: { modified: ["fresh.txt"] },
+        patch: "--- a/fresh.txt\n+++ b/fresh.txt\n@@ -1 +1 @@\n-old\n+new\n",
+      },
+    }));
+    const api = createMockGatewayAPI({ checkpointDiff });
+    useSessionStore.setState({ currentSessionId: "sess-1" } as any);
+    useGatewayStore.setState({ currentRunId: "run-1" } as any);
+    useUIStore.setState({
+      checkpointRollbackUndo: {
+        sessionId: "sess-1",
+        checkpointId: "cp-rollback",
+        guardCheckpointId: "guard-rollback",
+        paths: ["old.txt"],
+        status: "idle",
+      },
+    } as any);
+
+    handleGatewayEvent(
+      {
+        type: EventType.CheckpointCreated,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.CheckpointCreated,
+            payload: {
+              checkpoint_id: "cp-new",
+              code_checkpoint_ref: "c",
+              session_checkpoint_ref: "s",
+              commit_hash: "",
+              reason: "end_of_turn",
+            },
+          },
+        },
+        session_id: "sess-1",
+        run_id: "run-1",
+      },
+      api,
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(useUIStore.getState().checkpointRollbackUndo).toBeNull();
+    expect(
+      useUIStore.getState().fileChanges.map((entry) => entry.path),
+    ).toEqual(["fresh.txt"]);
+  });
+
+  it("run-scoped checkpoint diff keeps rollback undo when no changes are returned", async () => {
+    const checkpointDiff = vi.fn(async () => ({
+      payload: {
+        checkpoint_id: "cp-empty",
+        files: {},
+        patch: "",
+      },
+    }));
+    const api = createMockGatewayAPI({ checkpointDiff });
+    useSessionStore.setState({ currentSessionId: "sess-1" } as any);
+    useGatewayStore.setState({ currentRunId: "run-1" } as any);
+    useUIStore.setState({
+      checkpointRollbackUndo: {
+        sessionId: "sess-1",
+        checkpointId: "cp-rollback",
+        guardCheckpointId: "guard-rollback",
+        paths: ["old.txt"],
+        status: "idle",
+      },
+    } as any);
+
+    handleGatewayEvent(
+      {
+        type: EventType.CheckpointCreated,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.CheckpointCreated,
+            payload: {
+              checkpoint_id: "cp-empty",
+              code_checkpoint_ref: "c",
+              session_checkpoint_ref: "s",
+              commit_hash: "",
+              reason: "end_of_turn",
+            },
+          },
+        },
+        session_id: "sess-1",
+        run_id: "run-1",
+      },
+      api,
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(useUIStore.getState().checkpointRollbackUndo).toMatchObject({
+      checkpointId: "cp-rollback",
+      guardCheckpointId: "guard-rollback",
+    });
+    expect(useUIStore.getState().fileChanges).toHaveLength(0);
   });
 
   it("does not let run diff prev_checkpoint_id overwrite per-file rollback checkpoint", async () => {
@@ -3203,6 +3726,7 @@ describe("eventBridge", () => {
       .getState()
       .fileChanges.find((entry) => entry.path === "after-double-restore.txt");
     expect(change?.checkpoint_id).toBe("cp-new");
+    expect(useUIStore.getState().checkpointRollbackUndo).toBeNull();
 
     const textMessages = useChatStore
       .getState()

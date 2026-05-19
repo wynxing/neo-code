@@ -21,8 +21,46 @@ vi.mock('@/context/RuntimeProvider', () => ({
 
 describe('Sidebar ProviderModal', () => {
   beforeEach(() => {
+    vi.restoreAllMocks()
     cleanup()
     mockGatewayAPI = {
+      listMCPServers: vi.fn().mockResolvedValue({
+        payload: {
+          servers: [
+            {
+              id: 'stdio-weather',
+              enabled: true,
+              trust: false,
+              transport: 'stdio',
+              stdio: { command: 'weather', args: [], env: [] },
+            },
+          ],
+        },
+      }),
+      setMCPServerEnabled: vi.fn().mockResolvedValue(undefined),
+      deleteMCPServer: vi.fn().mockResolvedValue(undefined),
+      upsertMCPServer: vi.fn().mockResolvedValue(undefined),
+      listAvailableSkills: vi.fn().mockResolvedValue({
+        payload: {
+          skills: [
+            {
+              descriptor: {
+                id: 'skill-refactor',
+                name: 'Skill Refactor',
+                description: 'Refactor code safely',
+              },
+              active: false,
+            },
+          ],
+        },
+      }),
+      listSessionSkills: vi.fn().mockResolvedValue({
+        payload: {
+          skills: [],
+        },
+      }),
+      activateSessionSkill: vi.fn().mockResolvedValue(undefined),
+      deactivateSessionSkill: vi.fn().mockResolvedValue(undefined),
       listProviders: vi.fn().mockResolvedValue({
         payload: {
           providers: [
@@ -93,6 +131,7 @@ describe('Sidebar ProviderModal', () => {
     useWorkspaceStore.setState({
       workspaces: [],
       currentWorkspaceHash: '',
+      changing: false,
       switchWorkspace: vi.fn(),
       renameWorkspace: vi.fn(),
       deleteWorkspace: vi.fn(),
@@ -289,5 +328,98 @@ describe('Sidebar ProviderModal', () => {
       expect(chevronFor(workspaceOne)).not.toHaveClass('expanded')
       expect(chevronFor(workspaceTwo)).toHaveClass('expanded')
     })
+  })
+
+  it('disables workspace actions while a workspace change is in flight', () => {
+    useWorkspaceStore.setState({
+      workspaces: [
+        { hash: 'w1', path: '/workspace-one', name: 'Workspace One', createdAt: '1', updatedAt: '1' },
+        { hash: 'w2', path: '/workspace-two', name: 'Workspace Two', createdAt: '1', updatedAt: '1' },
+      ],
+      currentWorkspaceHash: 'w1',
+      changing: true,
+      switchWorkspace: vi.fn(),
+    } as any)
+
+    const { container } = render(<Sidebar />)
+
+    expect(screen.getByRole('button', { name: /Workspace One/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /Workspace Two/i })).toBeDisabled()
+
+    const addWorkspaceButton = container.querySelector('.sidebar-section-header .btn')
+    expect(addWorkspaceButton).toBeInstanceOf(HTMLButtonElement)
+    expect(addWorkspaceButton as HTMLButtonElement).toBeDisabled()
+  })
+
+  it('switches another workspace but does not re-switch the current workspace', async () => {
+    const switchWorkspace = vi.fn().mockResolvedValue(undefined)
+    useWorkspaceStore.setState({
+      workspaces: [
+        { hash: 'w1', path: '/workspace-one', name: 'Workspace One', createdAt: '1', updatedAt: '1' },
+        { hash: 'w2', path: '/workspace-two', name: 'Workspace Two', createdAt: '1', updatedAt: '1' },
+      ],
+      currentWorkspaceHash: 'w1',
+      changing: false,
+      switchWorkspace,
+    } as any)
+
+    render(<Sidebar />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Workspace Two/i }))
+    await waitFor(() => {
+      expect(switchWorkspace).toHaveBeenCalledWith('w2', mockGatewayAPI)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /Workspace One/i }))
+    expect(switchWorkspace).toHaveBeenCalledTimes(1)
+  })
+
+  it('immediately dispatches collapsed-rail actions', async () => {
+    const toggleSidebar = vi.fn()
+    const prepareNewChat = vi.fn()
+    useUIStore.setState({
+      toggleSidebar,
+    } as any)
+    useSessionStore.setState({
+      prepareNewChat,
+    } as any)
+
+    const { container } = render(<Sidebar collapsed />)
+    const collapsedButtons = Array.from(container.querySelectorAll('.sidebar-strip-btn'))
+
+    expect(collapsedButtons).toHaveLength(5)
+
+    fireEvent.click(collapsedButtons[0] as HTMLButtonElement)
+    expect(toggleSidebar).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(collapsedButtons[1] as HTMLButtonElement)
+    expect(prepareNewChat).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(collapsedButtons[2] as HTMLButtonElement)
+    await waitFor(() => {
+      expect(mockGatewayAPI.listMCPServers).toHaveBeenCalled()
+    })
+
+    fireEvent.click(collapsedButtons[3] as HTMLButtonElement)
+    await waitFor(() => {
+      expect(mockGatewayAPI.listAvailableSkills).toHaveBeenCalled()
+      expect(screen.getByText('Skill Refactor')).toBeInTheDocument()
+    })
+
+    fireEvent.click(collapsedButtons[4] as HTMLButtonElement)
+    await waitFor(() => {
+      expect(mockGatewayAPI.listProviders).toHaveBeenCalled()
+      expect(screen.getByText('Gemini')).toBeInTheDocument()
+    })
+  })
+
+  it('keeps the collapsed rail style above neighboring panels', () => {
+    const railRule = appCss.match(/\.sidebar-collapsed-wrapper\s*{(?<body>[^}]*)}/)?.groups?.body ?? ''
+    expect(railRule).toContain('position: relative')
+    expect(railRule).toContain('z-index: 20')
+    expect(railRule).toContain('isolation: isolate')
+    expect(railRule).toContain('width: 44px')
+    expect(railRule).toContain('min-width: 44px')
+    expect(railRule).toContain('flex: 0 0 44px')
   })
 })

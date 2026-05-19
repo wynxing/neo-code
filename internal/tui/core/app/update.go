@@ -3025,13 +3025,11 @@ var runtimeEventHandlerRegistry = map[tuiservices.EventType]func(*App, tuiservic
 	tuiservices.EventUserQuestionAnswered:                     runtimeEventUserQuestionResolvedHandler,
 	tuiservices.EventUserQuestionSkipped:                      runtimeEventUserQuestionResolvedHandler,
 	tuiservices.EventUserQuestionTimeout:                      runtimeEventUserQuestionResolvedHandler,
+	tuiservices.EventCompactStart:                             runtimeEventCompactStartHandler,
 	tuiservices.EventCompactApplied:                           runtimeEventCompactDoneHandler,
 	tuiservices.EventCompactError:                             runtimeEventCompactErrorHandler,
 	tuiservices.EventTokenUsage:                               runtimeEventTokenUsageHandler,
 	tuiservices.EventPhaseChanged:                             runtimeEventPhaseChangedHandler,
-	tuiservices.EventVerificationStarted:                      runtimeEventVerificationStartedHandler,
-	tuiservices.EventVerificationStageFinished:                runtimeEventVerificationStageFinishedHandler,
-	tuiservices.EventVerificationFinished:                     runtimeEventVerificationFinishedHandler,
 	tuiservices.EventVerificationCompleted:                    runtimeEventVerificationCompletedHandler,
 	tuiservices.EventVerificationFailed:                       runtimeEventVerificationFailedHandler,
 	tuiservices.EventAcceptanceDecided:                        runtimeEventAcceptanceDecidedHandler,
@@ -3069,9 +3067,8 @@ var runtimeEventHandlerRegistry = map[tuiservices.EventType]func(*App, tuiservic
 	tuiservices.EventSubAgentToolCallResult:                   runtimeEventSubAgentToolCallHandler,
 	tuiservices.EventSubAgentToolCallDenied:                   runtimeEventSubAgentToolCallHandler,
 	tuiservices.EventRuntimeSnapshotUpdated:                   runtimeEventRuntimeSnapshotUpdatedHandler,
-	tuiservices.EventFactsUpdated:                             runtimeEventFactsUpdatedHandler,
-	tuiservices.EventDecisionMade:                             runtimeEventDecisionMadeHandler,
 	tuiservices.EventSubAgentSnapshotUpdated:                  runtimeEventSubAgentSnapshotUpdatedHandler,
+	tuiservices.EventDecisionMade:                             runtimeEventDecisionMadeHandler,
 }
 
 func hookActivityLabel(source string, hookID string) string {
@@ -3496,6 +3493,22 @@ func runtimeEventSubAgentToolCallHandler(a *App, event tuiservices.RuntimeEvent)
 	return false
 }
 
+// runtimeEventSubAgentSnapshotUpdatedHandler 处理 subagent_snapshot_updated 事件，输出聚合计数。
+func runtimeEventSubAgentSnapshotUpdatedHandler(a *App, event tuiservices.RuntimeEvent) bool {
+	payload, ok := event.Payload.(tuiservices.SubAgentSnapshotUpdatedPayload)
+	if !ok {
+		return false
+	}
+	detail := fmt.Sprintf(
+		"started=%d completed=%d failed=%d",
+		payload.SubAgent.StartedCount,
+		payload.SubAgent.CompletedCount,
+		payload.SubAgent.FailedCount,
+	)
+	a.appendActivity("subagent", "SubAgent snapshot updated", detail, false)
+	return false
+}
+
 func runtimeEventPhaseChangedHandler(a *App, event tuiservices.RuntimeEvent) bool {
 	payload, ok := event.Payload.(tuiservices.PhaseChangedPayload)
 	if !ok {
@@ -3509,60 +3522,6 @@ func runtimeEventPhaseChangedHandler(a *App, event tuiservices.RuntimeEvent) boo
 	case "verify":
 		a.setRunProgress(0.82, "Verifying")
 	}
-	return false
-}
-
-// runtimeEventVerificationStartedHandler 处理验证流程开始事件，并更新运行进度提示。
-func runtimeEventVerificationStartedHandler(a *App, event tuiservices.RuntimeEvent) bool {
-	payload, ok := event.Payload.(tuiservices.VerificationStartedPayload)
-	if !ok {
-		return false
-	}
-	progress := 0.84
-	if payload.CompletionPassed {
-		progress = 0.88
-	}
-	a.setRunProgress(progress, "Verifying acceptance")
-	detail := fmt.Sprintf("completion_passed=%t", payload.CompletionPassed)
-	if reason := strings.TrimSpace(payload.CompletionBlockedReason); reason != "" {
-		detail = detail + " reason=" + reason
-	}
-	a.appendActivity("verify", "Verification started", detail, false)
-	return false
-}
-
-// runtimeEventVerificationStageFinishedHandler 处理单个 verifier 阶段完成事件。
-func runtimeEventVerificationStageFinishedHandler(a *App, event tuiservices.RuntimeEvent) bool {
-	payload, ok := event.Payload.(tuiservices.VerificationStageFinishedPayload)
-	if !ok {
-		return false
-	}
-	status := strings.ToLower(strings.TrimSpace(payload.Status))
-	detail := strings.TrimSpace(payload.Summary)
-	if detail == "" {
-		detail = strings.TrimSpace(payload.Reason)
-	}
-	if detail == "" {
-		detail = "no summary"
-	}
-	title := "Verifier stage finished"
-	if name := strings.TrimSpace(payload.Name); name != "" {
-		title = "Verifier stage: " + name
-	}
-	isError := status == "fail" || status == "hard_block"
-	a.appendActivity("verify", title, detail, isError)
-	return false
-}
-
-// runtimeEventVerificationFinishedHandler 处理验证总流程结束事件。
-func runtimeEventVerificationFinishedHandler(a *App, event tuiservices.RuntimeEvent) bool {
-	payload, ok := event.Payload.(tuiservices.VerificationFinishedPayload)
-	if !ok {
-		return false
-	}
-	a.setRunProgress(0.92, "Verification finished")
-	detail := fmt.Sprintf("acceptance=%s stop_reason=%s", payload.AcceptanceStatus, payload.StopReason)
-	a.appendActivity("verify", "Verification finished", detail, false)
 	return false
 }
 
@@ -3693,6 +3652,7 @@ func runtimeEventStopReasonDecidedHandler(a *App, event tuiservices.RuntimeEvent
 		}
 	case strings.ToLower(string(tuiservices.StopReasonTodoNotConverged)),
 		strings.ToLower(string(tuiservices.StopReasonTodoWaitingExternal)),
+		strings.ToLower(string(tuiservices.StopReasonAcceptContinue)),
 		strings.ToLower(string(tuiservices.StopReasonEmptyResponse)),
 		strings.ToLower(string(tuiservices.StopReasonRepeatCycle)),
 		strings.ToLower(string(tuiservices.StopReasonMaxTurnExceededWithUnconvergedTodos)),
@@ -3709,7 +3669,7 @@ func runtimeEventStopReasonDecidedHandler(a *App, event tuiservices.RuntimeEvent
 		a.state.StatusText = statusCanceled
 		a.appendActivity("run", "Canceled current run", "", false)
 	case strings.ToLower(string(tuiservices.StopReasonVerificationFailed)),
-		strings.ToLower(string(tuiservices.StopReasonAcceptCheckFailed)),
+		strings.ToLower(string(tuiservices.StopReasonAcceptContinueExhausted)),
 		strings.ToLower(string(tuiservices.StopReasonRequiredTodoFailed)),
 		strings.ToLower(string(tuiservices.StopReasonVerificationExecutionDenied)),
 		strings.ToLower(string(tuiservices.StopReasonVerificationExecutionError)):
@@ -3879,26 +3839,6 @@ func runtimeEventRuntimeSnapshotUpdatedHandler(a *App, event tuiservices.Runtime
 	return false
 }
 
-// runtimeEventFactsUpdatedHandler 处理 facts_updated 事件，输出简洁事实更新日志。
-func runtimeEventFactsUpdatedHandler(a *App, event tuiservices.RuntimeEvent) bool {
-	payload, ok := event.Payload.(tuiservices.FactsUpdatedPayload)
-	if !ok {
-		return false
-	}
-	reason := strings.TrimSpace(payload.Reason)
-	if reason == "" {
-		reason = "facts updated"
-	}
-	detail := reason
-	if runtimeFacts, ok := payload.Facts.RuntimeFacts["progress"].(map[string]any); ok {
-		if observed := coerceInt(runtimeFacts["observed_fact_count"]); observed > 0 {
-			detail = fmt.Sprintf("%s (observed_facts=%d)", reason, observed)
-		}
-	}
-	a.appendActivity("facts", "Runtime facts updated", detail, false)
-	return false
-}
-
 // runtimeEventDecisionMadeHandler 处理 decision_made 事件，输出最终裁决摘要。
 func runtimeEventDecisionMadeHandler(a *App, event tuiservices.RuntimeEvent) bool {
 	payload, ok := event.Payload.(tuiservices.DecisionMadePayload)
@@ -3932,22 +3872,6 @@ func runtimeEventDecisionMadeHandler(a *App, event tuiservices.RuntimeEvent) boo
 	if shouldRenderDecisionBlock {
 		a.appendInlineMessage(roleSystem, formatDecisionBlockMessage(payload))
 	}
-	return false
-}
-
-// runtimeEventSubAgentSnapshotUpdatedHandler 处理 subagent_snapshot_updated 事件，输出聚合计数。
-func runtimeEventSubAgentSnapshotUpdatedHandler(a *App, event tuiservices.RuntimeEvent) bool {
-	payload, ok := event.Payload.(tuiservices.SubAgentSnapshotUpdatedPayload)
-	if !ok {
-		return false
-	}
-	detail := fmt.Sprintf(
-		"started=%d completed=%d failed=%d",
-		payload.SubAgent.StartedCount,
-		payload.SubAgent.CompletedCount,
-		payload.SubAgent.FailedCount,
-	)
-	a.appendActivity("subagent", "SubAgent snapshot updated", detail, false)
 	return false
 }
 
@@ -4696,6 +4620,7 @@ func runtimeEventCompactDoneHandler(a *App, event tuiservices.RuntimeEvent) bool
 		return false
 	}
 	a.state.ExecutionError = ""
+	a.state.IsCompacting = false
 	a.state.StatusText = fmt.Sprintf("Compact(%s) saved %.1f%% context", payload.TriggerMode, payload.SavedRatio*100)
 	a.appendInlineMessage(
 		roleSystem,
@@ -4719,8 +4644,26 @@ func runtimeEventCompactErrorHandler(a *App, event tuiservices.RuntimeEvent) boo
 	}
 	message := fmt.Sprintf("Compact(%s) failed: %s", payload.TriggerMode, payload.Message)
 	a.state.ExecutionError = message
+	a.state.IsCompacting = false
 	a.state.StatusText = message
 	a.appendInlineMessage(roleError, message)
+	return true
+}
+
+func runtimeEventCompactStartHandler(a *App, event tuiservices.RuntimeEvent) bool {
+	mode, ok := event.Payload.(string)
+	if !ok {
+		return false
+	}
+	a.state.IsCompacting = true
+	a.state.StreamingReply = false
+	a.state.CurrentTool = ""
+	if mode != "" {
+		a.state.StatusText = fmt.Sprintf("Compacting (%s)...", mode)
+	} else {
+		a.state.StatusText = statusCompacting
+	}
+	a.state.ExecutionError = ""
 	return true
 }
 func (a *App) appendAssistantChunk(chunk string) {

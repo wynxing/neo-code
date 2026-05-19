@@ -5,7 +5,6 @@ import (
 
 	"neo-code/internal/runtime/acceptgate"
 	"neo-code/internal/runtime/controlplane"
-	"neo-code/internal/runtime/verify"
 )
 
 // EventType 标识 runtime 事件类型。
@@ -60,45 +59,46 @@ type StopReasonDecidedPayload struct {
 	Detail string                  `json:"detail,omitempty"`
 }
 
-// VerificationStartedPayload 描述 final 验收验证开始事件。
-type VerificationStartedPayload struct {
-	CompletionPassed        bool   `json:"completion_passed"`
-	CompletionBlockedReason string `json:"completion_blocked_reason,omitempty"`
-}
-
-// VerificationStageFinishedPayload 描述单个 verifier 阶段完成事件。
-type VerificationStageFinishedPayload struct {
-	Name       string                    `json:"name"`
-	Status     verify.VerificationStatus `json:"status"`
-	Summary    string                    `json:"summary,omitempty"`
-	Reason     string                    `json:"reason,omitempty"`
-	ErrorClass verify.ErrorClass         `json:"error_class,omitempty"`
-}
-
-// VerificationFinishedPayload 描述整体验证流程结束事件。
-type VerificationFinishedPayload struct {
-	AcceptanceStatus string                  `json:"acceptance_status"`
-	StopReason       controlplane.StopReason `json:"stop_reason,omitempty"`
-	ErrorClass       verify.ErrorClass       `json:"error_class,omitempty"`
-}
-
 // VerificationCompletedPayload 描述验证通过并可完成的事件。
 type VerificationCompletedPayload struct {
 	StopReason controlplane.StopReason `json:"stop_reason,omitempty"`
 }
 
+// VerificationStartedPayload 描述验证流程开始事件。
+type VerificationStartedPayload struct {
+	CompletionPassed        bool   `json:"completion_passed"`
+	CompletionBlockedReason string `json:"completion_blocked_reason,omitempty"`
+}
+
+// VerificationStageFinishedPayload 描述单个验证阶段完成事件。
+type VerificationStageFinishedPayload struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Summary    string `json:"summary,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	ErrorClass string `json:"error_class,omitempty"`
+}
+
+// VerificationFinishedPayload 描述验证流程结束事件。
+type VerificationFinishedPayload struct {
+	AcceptanceStatus string                  `json:"acceptance_status"`
+	StopReason       controlplane.StopReason `json:"stop_reason,omitempty"`
+	ErrorClass       string                  `json:"error_class,omitempty"`
+}
+
 // VerificationFailedPayload 描述验证失败事件。
 type VerificationFailedPayload struct {
 	StopReason controlplane.StopReason `json:"stop_reason,omitempty"`
-	ErrorClass verify.ErrorClass       `json:"error_class,omitempty"`
+	ErrorClass string                  `json:"error_class,omitempty"`
 }
 
 // AcceptanceDecidedPayload 描述 acceptance engine 决议结果。
 type AcceptanceDecidedPayload struct {
-	Status     string                   `json:"status"`
-	StopReason controlplane.StopReason  `json:"stop_reason,omitempty"`
-	Summary    string                   `json:"summary,omitempty"`
-	Results    []acceptgate.CheckResult `json:"results,omitempty"`
+	Status       string                   `json:"status"`
+	StopReason   controlplane.StopReason  `json:"stop_reason,omitempty"`
+	Summary      string                   `json:"summary,omitempty"`
+	ContinueHint string                   `json:"continue_hint,omitempty"`
+	Results      []acceptgate.CheckResult `json:"results,omitempty"`
 }
 
 // LedgerReconciledPayload 为账本对账预留负载。
@@ -362,11 +362,11 @@ const (
 	EventProgressEvaluated EventType = "progress_evaluated"
 	// EventStopReasonDecided 表示 stop reason 已决议。
 	EventStopReasonDecided EventType = "stop_reason_decided"
-	// EventVerificationStarted 表示 final 验证流程开始。
+	// EventVerificationStarted 表示验证流程开始。
 	EventVerificationStarted EventType = "verification_started"
-	// EventVerificationStageFinished 表示单个 verifier 阶段完成。
+	// EventVerificationStageFinished 表示单个验证阶段结束。
 	EventVerificationStageFinished EventType = "verification_stage_finished"
-	// EventVerificationFinished 表示 final 验证流程结束。
+	// EventVerificationFinished 表示验证流程结束。
 	EventVerificationFinished EventType = "verification_finished"
 	// EventVerificationCompleted 表示验证通过并可完成。
 	EventVerificationCompleted EventType = "verification_completed"
@@ -412,12 +412,10 @@ const (
 	EventRuntimeSnapshotUpdated EventType = "runtime_snapshot_updated"
 	// EventResumeApplied 表示运行启动时已应用 resume checkpoint 恢复策略。
 	EventResumeApplied EventType = "resume_applied"
-	// EventFactsUpdated 表示运行事实快照已更新。
-	EventFactsUpdated EventType = "facts_updated"
+	// EventSubAgentSnapshotUpdated 表示子代理聚合快照已更新。
+	EventSubAgentSnapshotUpdated EventType = "subagent_snapshot_updated"
 	// EventDecisionMade 表示 FinalDecider 已输出裁决。
 	EventDecisionMade EventType = "decision_made"
-	// EventSubAgentSnapshotUpdated 表示子代理状态快照已更新。
-	EventSubAgentSnapshotUpdated EventType = "subagent_snapshot_updated"
 	// EventTodoSnapshotUpdated 表示 todo 快照已更新。
 	EventTodoSnapshotUpdated EventType = "todo_snapshot_updated"
 

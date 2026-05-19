@@ -6,7 +6,6 @@ import (
 
 	"neo-code/internal/runtime/acceptgate"
 	"neo-code/internal/runtime/controlplane"
-	runtimeverify "neo-code/internal/runtime/verify"
 )
 
 // emitVerificationLifecycleEvents 发出 verification 开始、分阶段与结束事件，补齐可观测闭环。
@@ -26,9 +25,9 @@ func (s *Service) emitVerificationLifecycleEvents(
 	})
 
 	for _, result := range report.Results {
-		stageStatus := runtimeverify.VerificationPass
+		stageStatus := "pass"
 		if !result.Passed {
-			stageStatus = runtimeverify.VerificationFail
+			stageStatus = "fail"
 		}
 		s.emitRunScopedOptional(EventVerificationStageFinished, state, VerificationStageFinishedPayload{
 			Name:       strings.TrimSpace(result.Name),
@@ -39,9 +38,9 @@ func (s *Service) emitVerificationLifecycleEvents(
 		})
 	}
 
-	errorClass := runtimeverify.ErrorClass("")
+	errorClass := ""
 	if report.Outcome != acceptgate.OutcomeAccepted {
-		errorClass = runtimeverify.ErrorClassUnknown
+		errorClass = "unknown"
 	}
 	s.emitRunScopedOptional(EventVerificationFinished, state, VerificationFinishedPayload{
 		AcceptanceStatus: string(report.Outcome),
@@ -51,19 +50,19 @@ func (s *Service) emitVerificationLifecycleEvents(
 }
 
 // classifyVerificationStageErrorClass 将 acceptgate 单项结果映射为 verifier 兼容错误分类。
-func classifyVerificationStageErrorClass(result acceptgate.CheckResult) runtimeverify.ErrorClass {
+func classifyVerificationStageErrorClass(result acceptgate.CheckResult) string {
 	if result.Passed {
 		return ""
 	}
 	reason := strings.ToLower(strings.TrimSpace(result.Reason))
 	switch {
 	case strings.Contains(reason, "permission"):
-		return runtimeverify.ErrorClassPermissionDenied
+		return "permission_denied"
 	case strings.Contains(reason, "timeout"):
-		return runtimeverify.ErrorClassTimeout
+		return "timeout"
 	case strings.Contains(reason, "not found"):
-		return runtimeverify.ErrorClassCommandNotFound
+		return "command_not_found"
 	default:
-		return runtimeverify.ErrorClassUnknown
+		return "unknown"
 	}
 }

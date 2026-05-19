@@ -132,21 +132,17 @@ export type BackendMessage = {
   is_error?: boolean
 }
 
-/** 并发拉取 session 详情 + todos + checkpoints + runtime snapshot，并把后者写入对应 store。
- *  todos / checkpoints / runtime snapshot 失败用 .catch 兜底，不阻断主流程的 loadSession。 */
+/** 并发拉取 session 详情 + todos + runtime snapshot，并把后者写入对应 store。
+ *  todos / runtime snapshot 失败用 .catch 兜底，不阻断主流程的 loadSession。 */
 export async function loadSessionWithInsights(gatewayAPI: GatewayAPI, sessionId: string) {
-  const [sessionFrame, todosResult, checkpointsResult, runtimeSnapshotResult] = await Promise.all([
+  const [sessionFrame, todosResult, runtimeSnapshotResult] = await Promise.all([
     gatewayAPI.loadSession(sessionId),
     (gatewayAPI.listSessionTodos?.(sessionId) ?? Promise.resolve(null)).catch(() => null),
-    (gatewayAPI.listCheckpoints?.({ session_id: sessionId, limit: 50 }) ?? Promise.resolve(null)).catch(() => null),
     (gatewayAPI.getRuntimeSnapshot?.(sessionId) ?? Promise.resolve(null)).catch(() => null),
   ])
   const insightStore = useRuntimeInsightStore.getState()
   if (todosResult?.payload) {
     insightStore.setTodoSnapshot(todosResult.payload)
-  }
-  if (checkpointsResult?.payload) {
-    insightStore.setCheckpoints(checkpointsResult.payload)
   }
   const pendingQuestion = runtimeSnapshotResult?.payload?.pending_user_question
   if (pendingQuestion) {
@@ -265,6 +261,8 @@ export async function reloadSessionAfterCheckpointRestore(
 }
 
 let _fetchSessionsPromise: Promise<void> | null = null
+let _fetchSessionsSeq = 0
+let _switchSessionSeq = 0
 
 export const useSessionStore = create<SessionState>((set, get) => ({
   projects: [],
@@ -293,30 +291,34 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (prevAbort) {
       prevAbort.abort()
     }
+    const switchSeq = ++_switchSessionSeq
     const abortCtrl = new AbortController()
     set({ _switchAbort: abortCtrl, loading: true })
 
     const prevSessionId = get().currentSessionId
 
     try {
-      // 1. Set transitioning flag and clear messages FIRST (before bindStream)
+      // 1. Clear messages first, then enter transitioning state to keep event drop window effective
       const chatStore = useChatStore.getState()
-      chatStore.setTransitioning(true)
       chatStore.clearMessages()
+      chatStore.setTransitioning(true)
       useRuntimeInsightStore.getState().reset()
+      useUIStore.getState().clearCheckpointRollbackUndo()
 
       // 2. Update session ID
       set({ currentSessionId: sessionId })
 
       // 3. Bind stream (events will be discarded due to isTransitioning)
       await gatewayAPI.bindStream({ session_id: sessionId, channel: 'all' })
+      if (abortCtrl.signal.aborted || switchSeq !== _switchSessionSeq || get()._switchAbort !== abortCtrl) return
 
-      // 4. Load historical messages (concurrently fetch todos + checkpoints)
+      // 4. Load historical messages (concurrently fetch todos + runtime snapshot)
       const sessionFrame = await loadSessionWithInsights(gatewayAPI, sessionId)
+      if (abortCtrl.signal.aborted || switchSeq !== _switchSessionSeq || get()._switchAbort !== abortCtrl) return
       const sessionData = sessionFrame.payload as { messages?: BackendMessage[]; agent_mode?: string }
 
       // Check if this request was superseded
-      if (abortCtrl.signal.aborted) return
+      if (abortCtrl.signal.aborted || switchSeq !== _switchSessionSeq || get()._switchAbort !== abortCtrl) return
 
       // 5. Load messages and stop transitioning
       if (sessionData.messages && sessionData.messages.length > 0) {
@@ -328,7 +330,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       useChatStore.getState().setAgentMode(restoredMode)
       chatStore.setTransitioning(false)
     } catch (err) {
-      if (abortCtrl.signal.aborted) return
+      if (abortCtrl.signal.aborted || switchSeq !== _switchSessionSeq || get()._switchAbort !== abortCtrl) return
       console.error('switchSession failed:', err)
       // Revert to previous session and re-bind its stream
       set({ currentSessionId: prevSessionId })
@@ -337,7 +339,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }
       useChatStore.getState().setTransitioning(false)
     } finally {
-      if (get()._switchAbort === abortCtrl) {
+      if (switchSeq === _switchSessionSeq && get()._switchAbort === abortCtrl) {
         set({ loading: false, _switchAbort: null })
       }
     }
@@ -350,6 +352,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
     useChatStore.getState().clearMessages()
     useRuntimeInsightStore.getState().reset()
+    useUIStore.getState().clearCheckpointRollbackUndo()
     set({ currentSessionId: '', currentProjectId: '' })
   },
 
@@ -375,12 +378,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
     useChatStore.getState().clearMessages()
     useRuntimeInsightStore.getState().reset()
+    useUIStore.getState().clearCheckpointRollbackUndo()
     set({ currentSessionId: '', currentProjectId: '' })
   },
 
   resetForWorkspaceSwitch: () => {
+    const currentAbort = get()._switchAbort
+    if (currentAbort) {
+      currentAbort.abort()
+    }
     _fetchSessionsPromise = null
-    set({ _initialBindDone: false, loading: false })
+    _fetchSessionsSeq += 1
+    _switchSessionSeq += 1
+    set({ _initialBindDone: false, loading: false, _switchAbort: null })
   },
 
   removeSessionLocally: (sessionId) => {
@@ -394,24 +404,29 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // 去重：若已有 fetch 在进行中，复用同一 promise（force 跳过去重）
     if (!force && _fetchSessionsPromise) return _fetchSessionsPromise
 
-    _fetchSessionsPromise = (async () => {
+    const requestSeq = ++_fetchSessionsSeq
+    const fetchPromise = (async () => {
       set({ loading: true })
       try {
         const result = await gatewayAPI.listSessions()
+        if (requestSeq !== _fetchSessionsSeq) return
         const sessions = result.payload.sessions
         const projects = mapSessionsToProjects(sessions)
         set({ projects, loading: false })
 
         const state = get()
+        if (requestSeq !== _fetchSessionsSeq) return
         if (!isValidSessionId(state.currentSessionId) && sessions.length > 0) {
           const firstSession = sessions[0]
           set({ currentSessionId: firstSession.id })
           try {
             await gatewayAPI.bindStream({ session_id: firstSession.id, channel: 'all' })
+            if (requestSeq !== _fetchSessionsSeq) return
             set({ _initialBindDone: true })
 
-            // Load historical messages for the auto-selected session (concurrently fetch todos + checkpoints)
+            // Load historical messages for the auto-selected session (concurrently fetch todos + runtime snapshot)
             const sessionFrame = await loadSessionWithInsights(gatewayAPI, firstSession.id)
+            if (requestSeq !== _fetchSessionsSeq) return
             const sessionData = sessionFrame.payload as { messages?: BackendMessage[]; agent_mode?: string }
             if (sessionData.messages && sessionData.messages.length > 0) {
               const mapped = mapHistoryMessages(sessionData.messages)
@@ -420,18 +435,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             const restoredMode = sessionData.agent_mode === 'plan' ? 'plan' : 'build'
             useChatStore.getState().setAgentMode(restoredMode)
           } catch (err) {
+            if (requestSeq !== _fetchSessionsSeq) return
             console.error('Auto bindStream or loadSession failed:', err)
             useUIStore.getState().showToast('Failed to load session', 'error')
           }
         }
       } catch (err) {
+        if (requestSeq !== _fetchSessionsSeq) return
         console.error('fetchSessions failed:', err)
         set({ projects: [], loading: false })
       } finally {
-        _fetchSessionsPromise = null
+        if (requestSeq === _fetchSessionsSeq) {
+          _fetchSessionsPromise = null
+        }
       }
     })()
 
-    return _fetchSessionsPromise
+    _fetchSessionsPromise = fetchPromise
+    return fetchPromise
   },
 }))

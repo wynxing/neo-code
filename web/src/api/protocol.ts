@@ -17,7 +17,6 @@ export const Method = {
   LoadSession: "gateway.loadSession",
   ListSessionTodos: "session.todos.list",
   GetRuntimeSnapshot: "runtime.snapshot.get",
-  ListCheckpoints: "checkpoint.list",
   RestoreCheckpoint: "checkpoint.restore",
   UndoRestore: "checkpoint.undoRestore",
   CheckpointDiff: "checkpoint.diff",
@@ -113,9 +112,6 @@ export const EventType = {
   AssetSaved: "asset_saved",
   AssetSaveFailed: "asset_save_failed",
   ProgressEvaluated: "progress_evaluated",
-  VerificationStarted: "verification_started",
-  VerificationStageFinished: "verification_stage_finished",
-  VerificationFinished: "verification_finished",
   VerificationCompleted: "verification_completed",
   VerificationFailed: "verification_failed",
   AcceptanceDecided: "acceptance_decided",
@@ -241,12 +237,6 @@ export interface ListSessionTodosParams {
 
 export interface GetRuntimeSnapshotParams {
   session_id: string;
-}
-
-export interface ListCheckpointsParams {
-  session_id: string;
-  limit?: number;
-  restorable_only?: boolean;
 }
 
 export interface RestoreCheckpointParams {
@@ -427,25 +417,6 @@ export interface TodoEventPayload {
 export type ListSessionTodosResult = RPCResult<TodoSnapshot>;
 export type GetRuntimeSnapshotResult = RPCResult<RuntimeSnapshotPayload>;
 
-export interface VerificationStartedPayload {
-  completion_passed: boolean;
-  completion_blocked_reason?: string;
-}
-
-export interface VerificationStageFinishedPayload {
-  name: string;
-  status: string;
-  summary?: string;
-  reason?: string;
-  error_class?: string;
-}
-
-export interface VerificationFinishedPayload {
-  acceptance_status: string;
-  stop_reason?: string;
-  error_class?: string;
-}
-
 export interface VerificationCompletedPayload {
   stop_reason?: string;
 }
@@ -463,15 +434,6 @@ export interface AcceptanceDecidedPayload {
   user_visible_summary?: string;
   internal_summary?: string;
   continue_hint?: string;
-}
-
-export interface CheckpointEntry {
-  checkpoint_id: string;
-  session_id: string;
-  reason: string;
-  status: string;
-  restorable: boolean;
-  created_at_ms: number;
 }
 
 export interface FileDiffs {
@@ -530,7 +492,6 @@ export interface CheckpointUndoRestorePayload {
   session_id: string;
 }
 
-export type ListCheckpointsResult = RPCResult<CheckpointEntry[]>;
 export type RestoreCheckpointResult = RPCResult<CheckpointRestoreResultPayload>;
 export type UndoRestoreResult = RPCResult<CheckpointRestoreResultPayload>;
 export type CheckpointDiffResult = RPCResult<CheckpointDiffResultPayload>;

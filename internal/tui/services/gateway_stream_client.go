@@ -205,12 +205,6 @@ func restoreRuntimePayload(eventType EventType, payload any) (any, error) {
 		return decodeRuntimePayload[PhaseChangedPayload](payload)
 	case EventStopReasonDecided:
 		return decodeStopReasonPayload(payload)
-	case EventVerificationStarted:
-		return decodeRuntimePayload[VerificationStartedPayload](payload)
-	case EventVerificationStageFinished:
-		return decodeRuntimePayload[VerificationStageFinishedPayload](payload)
-	case EventVerificationFinished:
-		return decodeRuntimePayload[VerificationFinishedPayload](payload)
 	case EventVerificationCompleted:
 		return decodeRuntimePayload[VerificationCompletedPayload](payload)
 	case EventVerificationFailed:
@@ -255,19 +249,17 @@ func restoreRuntimePayload(eventType EventType, payload any) (any, error) {
 		return decodeRuntimePayload[SubAgentToolCallEventPayload](payload)
 	case EventRuntimeSnapshotUpdated:
 		return decodeRuntimePayload[RuntimeSnapshotUpdatedPayload](payload)
-	case EventFactsUpdated:
-		return decodeRuntimePayload[FactsUpdatedPayload](payload)
-	case EventDecisionMade:
-		return decodeRuntimePayload[DecisionMadePayload](payload)
 	case EventSubAgentSnapshotUpdated:
 		return decodeRuntimePayload[SubAgentSnapshotUpdatedPayload](payload)
+	case EventDecisionMade:
+		return decodeRuntimePayload[DecisionMadePayload](payload)
 	case EventType(RuntimeEventRunContext):
 		return decodeRuntimePayload[RuntimeRunContextPayload](payload)
 	case EventType(RuntimeEventToolStatus):
 		return decodeRuntimePayload[RuntimeToolStatusPayload](payload)
 	case EventType(RuntimeEventUsage):
 		return decodeRuntimePayload[RuntimeUsagePayload](payload)
-	case EventAgentChunk, EventToolChunk, EventError, EventToolCallThinking:
+	case EventAgentChunk, EventToolChunk, EventError, EventToolCallThinking, EventCompactStart:
 		return decodeStringPayload(payload), nil
 	default:
 		return payload, nil

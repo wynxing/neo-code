@@ -178,15 +178,6 @@ func TestRuntimeEventHandlerRegistryContainsRenamedEvents(t *testing.T) {
 	if _, ok := runtimeEventHandlerRegistry[agentruntime.EventSkillMissing]; !ok {
 		t.Fatalf("expected skill_missing handler to be registered")
 	}
-	if _, ok := runtimeEventHandlerRegistry[agentruntime.EventVerificationStarted]; !ok {
-		t.Fatalf("expected verification_started handler to be registered")
-	}
-	if _, ok := runtimeEventHandlerRegistry[agentruntime.EventVerificationStageFinished]; !ok {
-		t.Fatalf("expected verification_stage_finished handler to be registered")
-	}
-	if _, ok := runtimeEventHandlerRegistry[agentruntime.EventVerificationFinished]; !ok {
-		t.Fatalf("expected verification_finished handler to be registered")
-	}
 	if _, ok := runtimeEventHandlerRegistry[agentruntime.EventVerificationCompleted]; !ok {
 		t.Fatalf("expected verification_completed handler to be registered")
 	}
@@ -250,37 +241,28 @@ func TestRuntimeEventHandlerRegistryContainsRenamedEvents(t *testing.T) {
 	if _, ok := runtimeEventHandlerRegistry[agentruntime.EventSubAgentToolCallResult]; !ok {
 		t.Fatalf("expected subagent_tool_call_result handler to be registered")
 	}
+	if _, ok := runtimeEventHandlerRegistry[agentruntime.EventSubAgentSnapshotUpdated]; !ok {
+		t.Fatalf("expected subagent_snapshot_updated handler to be registered")
+	}
 	if _, ok := runtimeEventHandlerRegistry[agentruntime.EventRuntimeSnapshotUpdated]; !ok {
 		t.Fatalf("expected runtime_snapshot_updated handler to be registered")
 	}
-	if _, ok := runtimeEventHandlerRegistry[agentruntime.EventFactsUpdated]; !ok {
-		t.Fatalf("expected facts_updated handler to be registered")
-	}
 	if _, ok := runtimeEventHandlerRegistry[agentruntime.EventDecisionMade]; !ok {
 		t.Fatalf("expected decision_made handler to be registered")
-	}
-	if _, ok := runtimeEventHandlerRegistry[agentruntime.EventSubAgentSnapshotUpdated]; !ok {
-		t.Fatalf("expected subagent_snapshot_updated handler to be registered")
 	}
 	if _, ok := runtimeEventHandlerRegistry[agentruntime.EventTodoSnapshotUpdated]; !ok {
 		t.Fatalf("expected todo_snapshot_updated handler to be registered")
 	}
 }
 
-func TestRuntimeSnapshotAndFactsHandlers(t *testing.T) {
+func TestRuntimeSnapshotAndDecisionHandlers(t *testing.T) {
 	app, _ := newTestApp(t)
 
 	if runtimeEventRuntimeSnapshotUpdatedHandler(&app, agentruntime.RuntimeEvent{Payload: "bad"}) {
 		t.Fatalf("expected invalid runtime snapshot payload to return false")
 	}
-	if runtimeEventFactsUpdatedHandler(&app, agentruntime.RuntimeEvent{Payload: 1}) {
-		t.Fatalf("expected invalid facts payload to return false")
-	}
 	if runtimeEventDecisionMadeHandler(&app, agentruntime.RuntimeEvent{Payload: true}) {
 		t.Fatalf("expected invalid decision payload to return false")
-	}
-	if runtimeEventSubAgentSnapshotUpdatedHandler(&app, agentruntime.RuntimeEvent{Payload: []string{"bad"}}) {
-		t.Fatalf("expected invalid subagent snapshot payload to return false")
 	}
 
 	runtimeEventRuntimeSnapshotUpdatedHandler(&app, agentruntime.RuntimeEvent{
@@ -600,6 +582,9 @@ func TestRuntimeEventSubAgentHandlers(t *testing.T) {
 	}) {
 		t.Fatalf("expected invalid subagent tool call payload to return false")
 	}
+	if runtimeEventSubAgentSnapshotUpdatedHandler(&app, agentruntime.RuntimeEvent{Payload: 1}) {
+		t.Fatalf("expected invalid subagent snapshot payload to return false")
+	}
 	runtimeEventSubAgentToolCallHandler(&app, agentruntime.RuntimeEvent{
 		Type: agentruntime.EventSubAgentToolCallResult,
 		Payload: agentruntime.SubAgentToolCallEventPayload{
@@ -613,6 +598,20 @@ func TestRuntimeEventSubAgentHandlers(t *testing.T) {
 	last = app.activities[len(app.activities)-1]
 	if last.Title != "SubAgent tool call result" || !strings.Contains(last.Detail, "tool=bash") || last.IsError {
 		t.Fatalf("unexpected subagent tool call result activity: %+v", last)
+	}
+
+	runtimeEventSubAgentSnapshotUpdatedHandler(&app, agentruntime.RuntimeEvent{
+		Payload: agentruntime.SubAgentSnapshotUpdatedPayload{
+			SubAgent: agentruntime.SubAgentSnapshot{
+				StartedCount:   2,
+				CompletedCount: 1,
+				FailedCount:    1,
+			},
+		},
+	})
+	last = app.activities[len(app.activities)-1]
+	if last.Title != "SubAgent snapshot updated" || !strings.Contains(last.Detail, "started=2 completed=1 failed=1") || last.IsError {
+		t.Fatalf("unexpected subagent snapshot activity: %+v", last)
 	}
 }
 
@@ -710,65 +709,6 @@ func TestRuntimeEventMultimodalHandlers(t *testing.T) {
 func TestRuntimeEventVerificationAndAcceptanceHandlers(t *testing.T) {
 	app, _ := newTestApp(t)
 
-	if handled := runtimeEventVerificationStartedHandler(&app, agentruntime.RuntimeEvent{Payload: "bad"}); handled {
-		t.Fatalf("expected invalid verification_started payload to return false")
-	}
-	runtimeEventVerificationStartedHandler(&app, agentruntime.RuntimeEvent{
-		Payload: agentruntime.VerificationStartedPayload{CompletionPassed: false},
-	})
-	if !app.runProgressKnown || app.runProgressValue != 0.84 || app.runProgressLabel != "Verifying acceptance" {
-		t.Fatalf("unexpected progress after verification_started: known=%v value=%v label=%q", app.runProgressKnown, app.runProgressValue, app.runProgressLabel)
-	}
-	if len(app.activities) == 0 || app.activities[len(app.activities)-1].Title != "Verification started" {
-		t.Fatalf("expected verification started activity, got %+v", app.activities)
-	}
-
-	runtimeEventVerificationStartedHandler(&app, agentruntime.RuntimeEvent{
-		Payload: agentruntime.VerificationStartedPayload{CompletionPassed: true},
-	})
-	if app.runProgressValue != 0.88 {
-		t.Fatalf("progress value = %v, want 0.88 when completion passed", app.runProgressValue)
-	}
-	runtimeEventVerificationStartedHandler(&app, agentruntime.RuntimeEvent{
-		Payload: agentruntime.VerificationStartedPayload{
-			CompletionPassed:        false,
-			CompletionBlockedReason: "pending_todo",
-		},
-	})
-	verificationStarted := app.activities[len(app.activities)-1]
-	if !strings.Contains(verificationStarted.Detail, "reason=pending_todo") {
-		t.Fatalf("expected verification started detail to include blocked reason, got %+v", verificationStarted)
-	}
-
-	if handled := runtimeEventVerificationStageFinishedHandler(&app, agentruntime.RuntimeEvent{Payload: 1}); handled {
-		t.Fatalf("expected invalid stage payload to return false")
-	}
-	runtimeEventVerificationStageFinishedHandler(&app, agentruntime.RuntimeEvent{
-		Payload: agentruntime.VerificationStageFinishedPayload{
-			Name:    "git_diff",
-			Status:  "fail",
-			Summary: "",
-			Reason:  "",
-		},
-	})
-	stage := app.activities[len(app.activities)-1]
-	if stage.Title != "Verifier stage: git_diff" || stage.Detail != "no summary" || !stage.IsError {
-		t.Fatalf("unexpected stage activity: %+v", stage)
-	}
-
-	if handled := runtimeEventVerificationFinishedHandler(&app, agentruntime.RuntimeEvent{Payload: true}); handled {
-		t.Fatalf("expected invalid verification_finished payload to return false")
-	}
-	runtimeEventVerificationFinishedHandler(&app, agentruntime.RuntimeEvent{
-		Payload: agentruntime.VerificationFinishedPayload{
-			AcceptanceStatus: "accepted",
-			StopReason:       agentruntime.StopReasonAccepted,
-		},
-	})
-	if app.runProgressValue != 0.92 || app.runProgressLabel != "Verification finished" {
-		t.Fatalf("unexpected progress after verification_finished: value=%v label=%q", app.runProgressValue, app.runProgressLabel)
-	}
-
 	if handled := runtimeEventVerificationCompletedHandler(&app, agentruntime.RuntimeEvent{Payload: 1}); handled {
 		t.Fatalf("expected invalid verification_completed payload to return false")
 	}
@@ -801,7 +741,7 @@ func TestRuntimeEventVerificationAndAcceptanceHandlers(t *testing.T) {
 		Payload: agentruntime.AcceptanceDecidedPayload{
 			Status:     "failed",
 			Summary:    "command_success: missing successful command evidence",
-			StopReason: agentruntime.StopReasonAcceptCheckFailed,
+			StopReason: agentruntime.StopReasonAcceptContinueExhausted,
 			Results: []agentruntime.AcceptanceCheckResult{
 				{
 					Passed: false,

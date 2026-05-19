@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { useSessionStore } from '@/stores/useSessionStore'
 import { useChatStore } from '@/stores/useChatStore'
 import { useUIStore } from '@/stores/useUIStore'
@@ -46,6 +47,7 @@ export default function Sidebar({ collapsed }: SidebarProps) {
 
   const workspaces = useWorkspaceStore((s) => s.workspaces)
   const currentWorkspaceHash = useWorkspaceStore((s) => s.currentWorkspaceHash)
+  const workspaceChanging = useWorkspaceStore((s) => s.changing)
   const switchWorkspace = useWorkspaceStore((s) => s.switchWorkspace)
   const renameWorkspace = useWorkspaceStore((s) => s.renameWorkspace)
   const deleteWorkspace = useWorkspaceStore((s) => s.deleteWorkspace)
@@ -109,6 +111,7 @@ export default function Sidebar({ collapsed }: SidebarProps) {
 
   async function handleSelectWorkspace(hash: string) {
     if (!gatewayAPI) return
+    if (useWorkspaceStore.getState().changing) return
     if (hash !== currentWorkspaceHash) {
       await switchWorkspace(hash, gatewayAPI)
     }
@@ -138,6 +141,7 @@ export default function Sidebar({ collapsed }: SidebarProps) {
 
   async function handleCreateWorkspace(path: string, name?: string) {
     if (!gatewayAPI || !path.trim()) return
+    if (useWorkspaceStore.getState().changing) return
     await createWorkspace(path.trim(), gatewayAPI, name?.trim() || undefined)
     setCreateWorkspaceOpen(false)
   }
@@ -146,6 +150,17 @@ export default function Sidebar({ collapsed }: SidebarProps) {
     const store = useSessionStore.getState()
     store.prepareNewChat()
   }
+
+  const modalOverlays = typeof document === 'undefined'
+    ? null
+    : createPortal(
+        <>
+          {mcpModalOpen && <McpModal onClose={() => setMcpModalOpen(false)} />}
+          {skillModalOpen && <SkillModal onClose={() => setSkillModalOpen(false)} />}
+          {providerModalOpen && <ProviderModal onClose={() => setProviderModalOpen(false)} />}
+        </>,
+        document.body,
+      )
 
   // Collapsed sidebar strip
   if (collapsed) {
@@ -167,6 +182,7 @@ export default function Sidebar({ collapsed }: SidebarProps) {
         <button className="sidebar-strip-btn" onClick={() => setProviderModalOpen(true)} title="供应商">
           <Server size={16} />
         </button>
+        {modalOverlays}
       </>
     )
   }
@@ -196,7 +212,13 @@ export default function Sidebar({ collapsed }: SidebarProps) {
       {/* Section header: label + add workspace */}
       <div className="sidebar-section-header">
         <span className="sidebar-section-label">工作区</span>
-        <button className="btn btn-ghost" style={{ width: 24, height: 24, padding: 0 }} title="新建工作区" onClick={() => setCreateWorkspaceOpen(true)}>
+        <button
+          className="btn btn-ghost"
+          style={{ width: 24, height: 24, padding: 0 }}
+          title="新建工作区"
+          onClick={() => setCreateWorkspaceOpen(true)}
+          disabled={workspaceChanging}
+        >
           <FolderPlus size={14} />
         </button>
       </div>
@@ -253,6 +275,7 @@ export default function Sidebar({ collapsed }: SidebarProps) {
                 expanded={rowExpanded}
                 isCurrent={isCurrent}
                 isRenaming={isRenaming}
+                disabled={workspaceChanging}
                 renameValue={workspaceRenameValue}
                 onRenameValueChange={setWorkspaceRenameValue}
                 onCommitRename={() => handleCommitWorkspaceRename(ws.hash)}
@@ -425,11 +448,13 @@ function SessionItem({
 
 function WorkspaceRow({
   workspace, expanded, isCurrent, isRenaming, renameValue,
+  disabled,
   onRenameValueChange, onCommitRename, onCancelRename,
   onClick, onStartRename, onDelete,
 }: {
   workspace: Workspace
   expanded: boolean; isCurrent: boolean; isRenaming: boolean
+  disabled: boolean
   renameValue: string
   onRenameValueChange: (v: string) => void
   onCommitRename: () => void
@@ -446,7 +471,7 @@ function WorkspaceRow({
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
     >
-      <button className="workspace-header-main" onClick={onClick} title={workspace.path}>
+      <button className="workspace-header-main" onClick={onClick} title={workspace.path} disabled={disabled}>
         <span className={`chevron ${expanded ? 'expanded' : ''}`}>
           <ChevronRight size={14} />
         </span>
