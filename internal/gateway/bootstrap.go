@@ -108,7 +108,7 @@ func handleAuthenticateFrame(ctx context.Context, frame MessageFrame) MessageFra
 }
 
 // handleBindStreamFrame 处理 gateway.bindStream 并注册连接订阅关系。
-func handleBindStreamFrame(ctx context.Context, frame MessageFrame) MessageFrame {
+func handleBindStreamFrame(ctx context.Context, frame MessageFrame, runtimePort RuntimePort) MessageFrame {
 	params, err := decodeBindStreamParams(frame.Payload)
 	if err != nil {
 		return errorFrame(frame, err)
@@ -120,13 +120,18 @@ func handleBindStreamFrame(ctx context.Context, frame MessageFrame) MessageFrame
 		return errorFrame(frame, NewFrameError(ErrorCodeInternalError, "stream relay context is unavailable"))
 	}
 
+	if validationFrame := validateBindStreamSession(ctx, frame, runtimePort, params.SessionID); validationFrame != nil {
+		return *validationFrame
+	}
+
 	if bindErr := relay.BindConnection(connectionID, StreamBinding{
-		SessionID: params.SessionID,
-		RunID:     params.RunID,
-		Channel:   params.Channel,
-		Role:      params.Role,
-		State:     cloneMapValue(params.State),
-		Explicit:  true,
+		SessionID:     params.SessionID,
+		RunID:         params.RunID,
+		WorkspaceHash: WorkspaceHashFromContext(ctx),
+		Channel:       params.Channel,
+		Role:          params.Role,
+		State:         cloneMapValue(params.State),
+		Explicit:      true,
 	}); bindErr != nil {
 		return errorFrame(frame, bindErr)
 	}
@@ -144,6 +149,34 @@ func handleBindStreamFrame(ctx context.Context, frame MessageFrame) MessageFrame
 			"state":   cloneMapValue(params.State),
 		},
 	}
+}
+
+// validateBindStreamSession 确认事件流绑定的会话在当前工作区 runtime 中可见。
+func validateBindStreamSession(
+	ctx context.Context,
+	frame MessageFrame,
+	runtimePort RuntimePort,
+	sessionID string,
+) *MessageFrame {
+	if runtimePort == nil {
+		return nil
+	}
+	normalizedSessionID := strings.TrimSpace(sessionID)
+	if normalizedSessionID == "" {
+		return nil
+	}
+
+	callCtx, cancel := withRuntimeOperationTimeout(ctx)
+	defer cancel()
+	_, err := runtimePort.LoadSession(callCtx, LoadSessionInput{
+		SubjectID: AuthenticatedSubjectIDFromContext(ctx),
+		SessionID: normalizedSessionID,
+	})
+	if err == nil {
+		return nil
+	}
+	failedFrame := runtimeCallFailedFrame(callCtx, frame, err, "bind_stream")
+	return &failedFrame
 }
 
 // handleAskFrame 处理 gateway.ask 请求，并以异步方式转发到底层 Ask 编排能力。

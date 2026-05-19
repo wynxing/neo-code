@@ -424,9 +424,15 @@ export default function ChatInput() {
   async function handleCancel() {
     runCancelledRef.current = true
     const runId = useGatewayStore.getState().currentRunId
+    const currentSessionId = useSessionStore.getState().currentSessionId
     if (runId && gatewayAPI) {
+      if (!isValidSessionId(currentSessionId)) {
+        useUIStore.getState().showToast('Cannot cancel run without an active session', 'error')
+        useChatStore.getState().resetGeneratingState()
+        return
+      }
       try {
-        await gatewayAPI.cancel({ run_id: runId })
+        await gatewayAPI.cancel({ session_id: currentSessionId, run_id: runId })
       } catch (err) {
         console.error('Cancel failed:', err)
       }

@@ -47,6 +47,49 @@ func TestStreamRelayBindAndFallbackSession(t *testing.T) {
 	}
 }
 
+func TestStreamRelayFallbackSessionIsWorkspaceScoped(t *testing.T) {
+	relay := NewStreamRelay(StreamRelayOptions{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	connectionID := NewConnectionID()
+	workspaceState := NewConnectionWorkspaceState()
+	workspaceState.SetWorkspaceHash("workspace-a")
+	connectionCtx := WithConnectionID(ctx, connectionID)
+	connectionCtx = WithConnectionWorkspaceState(connectionCtx, workspaceState)
+	connectionCtx = WithStreamRelay(connectionCtx, relay)
+	if err := relay.RegisterConnection(ConnectionRegistration{
+		ConnectionID: connectionID,
+		Channel:      StreamChannelIPC,
+		Context:      connectionCtx,
+		Cancel:       cancel,
+		Write: func(message RelayMessage) error {
+			_ = message
+			return nil
+		},
+		Close: func() {},
+	}); err != nil {
+		t.Fatalf("register connection: %v", err)
+	}
+	defer relay.dropConnection(connectionID)
+
+	if bindErr := relay.BindConnection(connectionID, StreamBinding{
+		SessionID: "session-a",
+		Channel:   StreamChannelAll,
+		Explicit:  true,
+	}); bindErr != nil {
+		t.Fatalf("bind workspace-a: %v", bindErr)
+	}
+
+	workspaceState.SetWorkspaceHash("workspace-b")
+	if got := relay.ResolveFallbackSessionIDForWorkspace(connectionID, "workspace-b"); got != "" {
+		t.Fatalf("workspace-b fallback session id = %q, want empty", got)
+	}
+	if got := relay.ResolveFallbackSessionIDForWorkspace(connectionID, "workspace-a"); got != "session-a" {
+		t.Fatalf("workspace-a fallback session id = %q, want session-a", got)
+	}
+}
+
 func TestStreamRelayPublishRuntimeEventNoCrossSession(t *testing.T) {
 	relay := NewStreamRelay(StreamRelayOptions{})
 	ctx, cancel := context.WithCancel(context.Background())

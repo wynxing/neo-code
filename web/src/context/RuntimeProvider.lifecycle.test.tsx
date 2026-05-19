@@ -41,6 +41,7 @@ vi.mock('@/api/wsClient', () => ({
 				}
 			}),
 			_emitState: (s: any) => onState?.(s),
+			_emitReconnect: () => onReconnect?.(),
 		}
 		clients.push(client)
 		return client
@@ -148,6 +149,46 @@ describe('RuntimeProvider lifecycle', () => {
 		expect(sessionStorage.getItem('neocode.browserRuntimeConfig')).toBeNull()
 		expect(chatClear).toHaveBeenCalled()
 		expect(runtimeSnapshot.status).toBe('needs_config')
+	})
+
+	it('restores workspace context before rebinding session on reconnect', async () => {
+		sessionStorage.setItem(
+			'neocode.browserRuntimeConfig',
+			JSON.stringify({ mode: 'browser', gatewayBaseURL: 'http://127.0.0.1:8080', token: 'tok' }),
+		)
+		useWorkspaceStore.setState({
+			fetchWorkspaces: vi.fn().mockResolvedValue(undefined),
+			workspaces: [{ hash: 'w2', path: '/workspace-two', name: 'Two', createdAt: '', updatedAt: '' }],
+			currentWorkspaceHash: 'w2',
+		} as any)
+		useSessionStore.setState({
+			...useSessionStore.getState(),
+			currentSessionId: 'session-2',
+			fetchSessions: vi.fn().mockResolvedValue(undefined),
+		} as any)
+
+		let runtimeSnapshot: any = null
+		render(
+			<RuntimeProvider>
+				<RuntimeProbe onReady={(rt) => { runtimeSnapshot = rt }} />
+			</RuntimeProvider>,
+		)
+		await waitFor(() => expect(runtimeSnapshot?.status).toBe('connected'))
+		const client = clients[0]
+		client.call.mockClear()
+
+		await act(async () => {
+			await client._emitReconnect()
+		})
+
+		const methods = client.call.mock.calls.map((call: any[]) => call[0])
+		const switchIndex = methods.indexOf('gateway.switchWorkspace')
+		const bindIndex = methods.indexOf('gateway.bindStream')
+		expect(switchIndex).toBeGreaterThanOrEqual(0)
+		expect(bindIndex).toBeGreaterThanOrEqual(0)
+		expect(switchIndex).toBeLessThan(bindIndex)
+		expect(client.call).toHaveBeenCalledWith('gateway.switchWorkspace', { workspace_hash: 'w2' })
+		expect(client.call).toHaveBeenCalledWith('gateway.bindStream', { session_id: 'session-2', channel: 'all' })
 	})
 })
 

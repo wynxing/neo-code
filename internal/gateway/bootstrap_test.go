@@ -1232,7 +1232,7 @@ func TestHandleBindStreamFrameErrors(t *testing.T) {
 			Payload: protocol.BindStreamParams{
 				SessionID: "session-1",
 			},
-		})
+		}, nil)
 		if response.Type != FrameTypeError {
 			t.Fatalf("response type = %q, want %q", response.Type, FrameTypeError)
 		}
@@ -1271,7 +1271,7 @@ func TestHandleBindStreamFrameErrors(t *testing.T) {
 				SessionID: "session-1",
 				Channel:   "ipc",
 			},
-		})
+		}, nil)
 		if response.Type != FrameTypeError {
 			t.Fatalf("response type = %q, want %q", response.Type, FrameTypeError)
 		}
@@ -1279,6 +1279,57 @@ func TestHandleBindStreamFrameErrors(t *testing.T) {
 			t.Fatalf("response error = %#v, want %q", response.Error, ErrorCodeInvalidAction.String())
 		}
 	})
+}
+
+func TestHandleBindStreamFrameRejectsSessionOutsideCurrentWorkspace(t *testing.T) {
+	relay := NewStreamRelay(StreamRelayOptions{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	connectionID := NewConnectionID()
+	workspaceState := NewConnectionWorkspaceState()
+	workspaceState.SetWorkspaceHash("workspace-b")
+	connectionCtx := WithConnectionID(ctx, connectionID)
+	connectionCtx = WithConnectionWorkspaceState(connectionCtx, workspaceState)
+	connectionCtx = WithStreamRelay(connectionCtx, relay)
+	if err := relay.RegisterConnection(ConnectionRegistration{
+		ConnectionID: connectionID,
+		Channel:      StreamChannelIPC,
+		Context:      connectionCtx,
+		Cancel:       cancel,
+		Write: func(message RelayMessage) error {
+			_ = message
+			return nil
+		},
+		Close: func() {},
+	}); err != nil {
+		t.Fatalf("register connection: %v", err)
+	}
+	defer relay.dropConnection(connectionID)
+
+	runtimeStub := &bootstrapRuntimeStub{
+		loadSessionFn: func(context.Context, LoadSessionInput) (Session, error) {
+			return Session{}, ErrRuntimeResourceNotFound
+		},
+	}
+	response := handleBindStreamFrame(connectionCtx, MessageFrame{
+		Type:      FrameTypeRequest,
+		Action:    FrameActionBindStream,
+		RequestID: "bind-cross-workspace",
+		Payload: protocol.BindStreamParams{
+			SessionID: "session-from-workspace-a",
+			Channel:   "all",
+		},
+	}, runtimeStub)
+	if response.Type != FrameTypeError {
+		t.Fatalf("response type = %q, want %q", response.Type, FrameTypeError)
+	}
+	if response.Error == nil || response.Error.Code != ErrorCodeResourceNotFound.String() {
+		t.Fatalf("response error = %#v, want resource_not_found", response.Error)
+	}
+	if got := relay.ResolveFallbackSessionIDForWorkspace(connectionID, "workspace-b"); got != "" {
+		t.Fatalf("binding should not be written after validation failure, got fallback %q", got)
+	}
 }
 
 func TestHandleTriggerActionFrame(t *testing.T) {

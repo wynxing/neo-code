@@ -12,15 +12,16 @@ import (
 
 // RequestLogEntry 表示统一结构化请求日志字段。
 type RequestLogEntry struct {
-	RequestID    string `json:"request_id"`
-	SessionID    string `json:"session_id"`
-	Method       string `json:"method"`
-	Source       string `json:"source"`
-	Status       string `json:"status"`
-	GatewayCode  string `json:"gateway_code,omitempty"`
-	LatencyMS    int64  `json:"latency_ms"`
-	ConnectionID string `json:"connection_id,omitempty"`
-	AuthState    string `json:"auth_state,omitempty"`
+	RequestID     string `json:"request_id"`
+	SessionID     string `json:"session_id"`
+	Method        string `json:"method"`
+	Source        string `json:"source"`
+	Status        string `json:"status"`
+	WorkspaceHash string `json:"workspace_hash,omitempty"`
+	GatewayCode   string `json:"gateway_code,omitempty"`
+	LatencyMS     int64  `json:"latency_ms"`
+	ConnectionID  string `json:"connection_id,omitempty"`
+	AuthState     string `json:"auth_state,omitempty"`
 }
 
 // emitRequestLog 输出网关结构化日志。
@@ -36,6 +37,9 @@ func emitRequestLog(ctx context.Context, logger *log.Logger, entry RequestLogEnt
 	}
 	if connectionID, ok := ConnectionIDFromContext(ctx); ok {
 		entry.ConnectionID = string(connectionID)
+	}
+	if entry.WorkspaceHash == "" {
+		entry.WorkspaceHash = WorkspaceHashFromContext(ctx)
 	}
 	if authState, ok := ConnectionAuthStateFromContext(ctx); ok && authState.IsAuthenticated() {
 		entry.AuthState = "authenticated"
