@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"neo-code/internal/tuiv2/state"
+	"neo-code/internal/tuiv2/theme"
 )
 
 // SoftInspector 渲染响应式右侧弱信息列。
@@ -39,11 +40,11 @@ func (c *SoftInspector) View() string {
 	if width <= 0 {
 		width = c.state.Layout.Width
 	}
-	lines := []string{statusMuted.Render("Soft Inspector")}
+	lines := []string{theme.MutedStyle().Render("Soft Inspector")}
 	lines = append(lines, c.sessionLines()...)
-	lines = append(lines, "", statusMuted.Render("Context"))
+	lines = append(lines, "", theme.MutedStyle().Render("Context"))
 	lines = append(lines, c.contextLine())
-	lines = append(lines, "", statusMuted.Render("Token Usage"))
+	lines = append(lines, "", theme.MutedStyle().Render("Token Usage"))
 	lines = append(lines, fmt.Sprintf("  ↑ %d ↓ %d", c.state.Runtime.Tokens.Input, c.state.Runtime.Tokens.Output))
 	content := strings.Join(lines, "\n")
 	if width > 0 {
@@ -54,16 +55,16 @@ func (c *SoftInspector) View() string {
 
 // sessionLines 渲染会话列表的压缩摘要。
 func (c *SoftInspector) sessionLines() []string {
-	lines := []string{"", statusMuted.Render("Session")}
+	lines := []string{"", theme.MutedStyle().Render("Session")}
 	if len(c.state.Gateway.Sessions) == 0 {
-		return append(lines, "  · none")
+		return append(lines, "  "+theme.Separator()+" none")
 	}
 	for index, session := range c.state.Gateway.Sessions {
 		if index >= 3 {
-			lines = append(lines, fmt.Sprintf("  · +%d more", len(c.state.Gateway.Sessions)-index))
+			lines = append(lines, fmt.Sprintf("  %s +%d more", theme.Separator(), len(c.state.Gateway.Sessions)-index))
 			break
 		}
-		lines = append(lines, "  · "+session.Title)
+		lines = append(lines, "  "+theme.Separator()+" "+session.Title)
 	}
 	return lines
 }
@@ -72,7 +73,7 @@ func (c *SoftInspector) sessionLines() []string {
 func (c *SoftInspector) contextLine() string {
 	total := c.state.Runtime.Tokens.Total
 	if total == 0 {
-		return "  ▎0/100k"
+		return "  " + theme.AccentBar() + "0/100k"
 	}
-	return fmt.Sprintf("  ▎%d/100k", total)
+	return fmt.Sprintf("  %s%d/100k", theme.AccentBar(), total)
 }

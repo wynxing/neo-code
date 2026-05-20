@@ -6,19 +6,12 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"neo-code/internal/tuiv2/state"
+	"neo-code/internal/tuiv2/theme"
 )
 
 const surfaceName = "ghost-console"
-
-var (
-	statusBlue  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7aa2f7"))
-	statusGreen = lipgloss.NewStyle().Foreground(lipgloss.Color("#9ece6a"))
-	statusRed   = lipgloss.NewStyle().Foreground(lipgloss.Color("#f7768e"))
-	statusMuted = lipgloss.NewStyle().Foreground(lipgloss.Color("#565f89"))
-)
 
 // AmbientStatus 渲染连接状态、会话名、模型名、token 用量和运行态摘要。
 type AmbientStatus struct {
@@ -45,14 +38,14 @@ func (c *AmbientStatus) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View 渲染单行 Ambient Status，不使用边框或药丸标签。
 func (c *AmbientStatus) View() string {
 	parts := []string{
-		statusBlue.Render("NEOCODE"),
+		theme.AccentStyle().Render("NEOCODE"),
 		c.phase(),
-		statusMuted.Render(surfaceName),
-		statusMuted.Render(c.model()),
-		statusMuted.Render(c.tokens()),
+		theme.MutedStyle().Render(surfaceName),
+		theme.MutedStyle().Render(c.model()),
+		theme.MutedStyle().Render(c.tokens()),
 	}
 	if c.state.Gateway.ActiveSess != nil {
-		parts = append(parts, statusMuted.Render(c.state.Gateway.ActiveSess.Title))
+		parts = append(parts, theme.MutedStyle().Render(c.state.Gateway.ActiveSess.Title))
 	}
 	line := strings.Join(parts, "   ")
 	if c.state.Layout.Width > 0 {
@@ -66,13 +59,13 @@ func (c *AmbientStatus) phase() string {
 	phase := c.state.Runtime.Phase
 	switch phase {
 	case state.RuntimePhaseRunning, state.RuntimePhaseWaitingPermission, state.RuntimePhaseWaitingUser:
-		return statusBlue.Render("◉ " + phase)
+		return theme.AccentStyle().Render(theme.StatusSymbol(theme.PhaseRunning) + " " + phase)
 	case state.RuntimePhaseError:
-		return statusRed.Render("× " + phase)
+		return theme.ErrorStyle().Render(theme.StatusSymbol(theme.PhaseError) + " " + phase)
 	case state.RuntimePhaseCancelled:
-		return statusMuted.Render("◌ " + phase)
+		return theme.MutedStyle().Render(theme.StatusSymbol(theme.PhaseCancelled) + " " + phase)
 	default:
-		return statusGreen.Render("○ " + phase)
+		return theme.SuccessStyle().Render(theme.StatusSymbol(theme.PhaseIdle) + " " + phase)
 	}
 }
 
@@ -87,5 +80,5 @@ func (c *AmbientStatus) model() string {
 // tokens 返回 token 用量的紧凑显示文本。
 func (c *AmbientStatus) tokens() string {
 	tokens := c.state.Runtime.Tokens
-	return fmt.Sprintf("↑ %d ↓ %d · %d", tokens.Input, tokens.Output, tokens.Total)
+	return fmt.Sprintf("↑ %d ↓ %d %s %d", tokens.Input, tokens.Output, theme.Separator(), tokens.Total)
 }

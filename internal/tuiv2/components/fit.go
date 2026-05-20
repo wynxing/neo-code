@@ -3,7 +3,7 @@ package components
 import (
 	"strings"
 
-	"github.com/charmbracelet/x/ansi"
+	"neo-code/internal/tuiv2/theme"
 )
 
 // fitBlock 将组件输出限制在指定宽度内，避免 lipgloss 宽度布局触发自动换行。
@@ -24,11 +24,11 @@ func fitBlockLine(line string, width int, pad bool) string {
 	if target <= 0 {
 		return ""
 	}
-	fitted := ansi.Truncate(line, target, "")
+	fitted := theme.Truncate(line, target)
 	if !pad {
 		return fitted
 	}
-	lineWidth := ansi.StringWidth(fitted)
+	lineWidth := theme.DisplayWidth(fitted)
 	if lineWidth < target {
 		fitted += strings.Repeat(" ", target-lineWidth)
 	}

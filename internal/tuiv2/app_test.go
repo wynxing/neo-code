@@ -122,7 +122,7 @@ func TestAppViewShowsFocusOnlyLayout(t *testing.T) {
 
 	for _, want := range []string{
 		"NEOCODE",
-		"○ idle",
+		"idle",
 		"ghost-console",
 		"Agent Stream",
 		"Soft Inspector",

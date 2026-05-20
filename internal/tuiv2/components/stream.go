@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"neo-code/internal/tuiv2/state"
+	"neo-code/internal/tuiv2/theme"
 )
 
 // AgentStream 渲染 Agent 行为流，包括消息、工具调用和状态条目。
@@ -33,10 +34,10 @@ func (c *AgentStream) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View 渲染 Agent Stream，占位阶段用缩进和状态符号表达层级。
 func (c *AgentStream) View() string {
 	width := c.streamWidth()
-	lines := []string{statusMuted.Render("Agent Stream")}
+	lines := []string{theme.MutedStyle().Render("Agent Stream")}
 	if len(c.state.Stream) == 0 {
-		lines = append(lines, statusBlue.Render("  ◉ 我可以帮你做什么？"))
-		lines = append(lines, statusMuted.Render("  ○ "+surfaceName))
+		lines = append(lines, theme.AccentStyle().Render("  "+theme.StatusSymbol(theme.PhaseRunning)+" 我可以帮你做什么？"))
+		lines = append(lines, theme.MutedStyle().Render("  "+theme.StatusSymbol(theme.PhaseIdle)+" "+surfaceName))
 	} else {
 		for _, entry := range tailEntries(c.state.Stream, c.visibleEntries()) {
 			lines = append(lines, c.renderEntry(entry))
@@ -79,29 +80,18 @@ func (c *AgentStream) renderEntry(entry state.StreamEntry) string {
 	}
 	switch entry.Type {
 	case "tool_started", "tool_start":
-		return statusBlue.Render("  ◉ tool."+stringOrDash(entry.ToolName)) + statusMuted.Render(" · "+content)
+		return theme.AccentStyle().Render("  "+theme.StreamPrefix(entry.Type)+" tool."+stringOrDash(entry.ToolName)) +
+			theme.MutedStyle().Render(" "+theme.Separator()+" "+content)
 	case "tool_finished", "tool_end":
-		return statusGreen.Render("  ✓ tool."+stringOrDash(entry.ToolName)) + statusMuted.Render(" · "+content)
+		return theme.SuccessStyle().Render("  "+theme.StreamPrefix(entry.Type)+" tool."+stringOrDash(entry.ToolName)) +
+			theme.MutedStyle().Render(" "+theme.Separator()+" "+content)
 	case "permission_requested", "question":
-		return statusBlue.Render("  ◉ "+entry.Type) + statusMuted.Render(" · "+content)
+		return theme.AccentStyle().Render("  "+theme.StreamPrefix(entry.Type)+" "+entry.Type) +
+			theme.MutedStyle().Render(" "+theme.Separator()+" "+content)
 	case "error", "gateway_offline":
-		return statusRed.Render("  × " + content)
+		return theme.ErrorStyle().Render("  " + theme.StreamPrefix(entry.Type) + " " + content)
 	default:
-		return statusMuted.Render(fmt.Sprintf("  %s %s", streamSymbol(entry.Type), content))
-	}
-}
-
-// streamSymbol 返回指定流条目的语义状态符号。
-func streamSymbol(entryType string) string {
-	switch entryType {
-	case "message":
-		return "○"
-	case "run_finished", "run_cancelled":
-		return "✓"
-	case "assistant_delta", "run_started":
-		return "◉"
-	default:
-		return "◌"
+		return theme.MutedStyle().Render(fmt.Sprintf("  %s %s", theme.StreamPrefix(entry.Type), content))
 	}
 }
 

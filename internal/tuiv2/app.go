@@ -8,11 +8,11 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 
 	"neo-code/internal/tuiv2/components"
 	"neo-code/internal/tuiv2/gateway"
 	"neo-code/internal/tuiv2/state"
+	"neo-code/internal/tuiv2/theme"
 )
 
 const (
@@ -46,12 +46,6 @@ type App struct {
 	commandPrompt *components.CommandPrompt
 	softInspector *components.SoftInspector
 }
-
-var (
-	debugStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#e0af68"))
-	errorStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#f7768e"))
-	separatorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#3b4261"))
-)
 
 var _ tea.Model = (*App)(nil)
 
@@ -112,11 +106,11 @@ func (a *App) View() string {
 		a.separatorLine(),
 	}
 	if a.lastErr != "" {
-		lines = append(lines, errorStyle.Render("  × "+a.lastErr))
+		lines = append(lines, theme.ErrorStyle().Render("  "+theme.StatusSymbol(theme.PhaseError)+" "+a.lastErr))
 	}
 	lines = append(lines, a.mainArea(), a.separatorLine(), a.commandPrompt.View())
 	if a.debug {
-		lines = append(lines, "", debugStyle.Render(a.debugLine()))
+		lines = append(lines, "", theme.WarningStyle().Render(a.debugLine()))
 	}
 	return a.fitViewToTerminal(strings.Join(lines, "\n"))
 }
@@ -166,7 +160,7 @@ func (a *App) separatorLine() string {
 	if width <= 0 {
 		width = 48
 	}
-	return separatorStyle.Render(strings.Repeat("─", width))
+	return theme.SubtleStyle().Render(strings.Repeat("─", width))
 }
 
 // fitViewToTerminal 将视图约束到当前终端尺寸，避免 resize 后自动换行或旧行残留。
@@ -202,8 +196,8 @@ func fitLine(line string, width int) string {
 	if target <= 0 {
 		return ""
 	}
-	fitted := ansi.Truncate(line, target, "")
-	lineWidth := ansi.StringWidth(fitted)
+	fitted := theme.Truncate(line, target)
+	lineWidth := theme.DisplayWidth(fitted)
 	if lineWidth < target {
 		fitted += strings.Repeat(" ", target-lineWidth)
 	}
