@@ -66,6 +66,8 @@ type LayoutState struct {
 	Height         int
 	InspectorWidth int
 	ShowInspector  bool
+	ScrollOffset   int
+	AutoScroll     bool
 }
 
 // InputMode 表示 TUI v2 顶层输入模式。
@@ -111,6 +113,7 @@ func NewViewState() *ViewState {
 	return &ViewState{
 		Runtime: RuntimeState{Phase: RuntimePhaseIdle},
 		Input:   InputState{Mode: InputStateModeMessage},
+		Layout:  LayoutState{AutoScroll: true},
 		Mode:    InputModeInput,
 	}
 }

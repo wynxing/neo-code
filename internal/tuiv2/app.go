@@ -80,6 +80,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.applyWindowSize(msg.Width, msg.Height)
 		return a, tea.ClearScreen
 	case tea.KeyMsg:
+		if handled, cmd := a.routeStreamKey(msg); handled {
+			return a, cmd
+		}
 		switch msg.String() {
 		case "ctrl+c", "esc", "q":
 			return a, tea.Quit
@@ -93,7 +96,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.closed {
 			return a, nil
 		}
+		beforeStreamLen := len(a.state.Stream)
 		a.state = state.Reduce(a.state, msg.event)
+		if len(a.state.Stream) > beforeStreamLen {
+			a.state.Layout.AutoScroll = true
+			a.state.Layout.ScrollOffset = 0
+		}
 		a.bindComponents()
 		if a.state.Runtime.Phase == state.RuntimePhaseError && len(a.state.Stream) > 0 {
 			a.lastErr = a.state.Stream[len(a.state.Stream)-1].Content
@@ -143,6 +151,17 @@ func (a *App) routeComponents(msg tea.Msg) tea.Cmd {
 	_, inspectorCmd := a.softInspector.Update(msg)
 	_, promptCmd := a.commandPrompt.Update(msg)
 	return tea.Batch(statusCmd, streamCmd, inspectorCmd, promptCmd)
+}
+
+// routeStreamKey 将滚动按键优先交给 Agent Stream，避免与全局快捷键混淆。
+func (a *App) routeStreamKey(msg tea.KeyMsg) (bool, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down", "k", "up", "g", "G":
+		_, cmd := a.agentStream.Update(msg)
+		return true, cmd
+	default:
+		return false, nil
+	}
 }
 
 // mainArea 渲染中部区域，按终端宽度决定 Inspector 右侧或纵向压缩显示。
