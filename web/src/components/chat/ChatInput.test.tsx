@@ -5,6 +5,7 @@ import { useChatStore } from '@/stores/useChatStore'
 import { useComposerStore } from '@/stores/useComposerStore'
 import { useSessionStore } from '@/stores/useSessionStore'
 import { useRuntimeInsightStore } from '@/stores/useRuntimeInsightStore'
+import { useGatewayStore } from '@/stores/useGatewayStore'
 
 const mockGatewayAPI = {
   listAvailableSkills: vi.fn(),
@@ -70,6 +71,7 @@ describe('ChatInput', () => {
 
     useComposerStore.setState({ composerText: '' })
     useSessionStore.setState({ currentSessionId: '' } as never)
+    useGatewayStore.setState({ currentRunId: '' } as never)
     useRuntimeInsightStore.getState().reset()
     useChatStore.setState({
       isGenerating: false,
@@ -334,5 +336,49 @@ describe('ChatInput', () => {
     })
 
     expect(ring).toHaveAttribute('stroke', 'var(--error)')
+  })
+
+  it('sends session id when cancelling an active run', async () => {
+    useSessionStore.setState({ currentSessionId: 'session-1' } as never)
+    useGatewayStore.setState({ currentRunId: 'run-1' } as never)
+    useChatStore.setState({ isGenerating: true } as never)
+    mockGatewayAPI.cancel.mockResolvedValueOnce({ payload: { canceled: true, run_id: 'run-1' } })
+    render(<ChatInput />)
+
+    fireEvent.click(screen.getByTitle('停止生成'))
+
+    await waitFor(() => {
+      expect(mockGatewayAPI.cancel).toHaveBeenCalledWith({ session_id: 'session-1', run_id: 'run-1' })
+    })
+  })
+
+  it('falls back to run id only when cancelling without an active session', async () => {
+    useSessionStore.setState({ currentSessionId: '' } as never)
+    useGatewayStore.setState({ currentRunId: 'run-1' } as never)
+    useChatStore.setState({ isGenerating: true } as never)
+    mockGatewayAPI.cancel.mockResolvedValueOnce({ payload: { canceled: true, run_id: 'run-1' } })
+    render(<ChatInput />)
+
+    fireEvent.click(screen.getByTitle(/停止生成/))
+
+    await waitFor(() => {
+      expect(mockGatewayAPI.cancel).toHaveBeenCalledWith({ run_id: 'run-1' })
+    })
+  })
+
+  it('does not reset generating state when no cancel request is sent', async () => {
+    const resetGeneratingState = vi.spyOn(useChatStore.getState(), 'resetGeneratingState')
+    useSessionStore.setState({ currentSessionId: '' } as never)
+    useGatewayStore.setState({ currentRunId: '' } as never)
+    useChatStore.setState({ isGenerating: true } as never)
+    render(<ChatInput />)
+
+    fireEvent.click(screen.getByTitle(/停止生成/))
+
+    await waitFor(() => {
+      expect(mockGatewayAPI.cancel).not.toHaveBeenCalled()
+    })
+    expect(resetGeneratingState).not.toHaveBeenCalled()
+    resetGeneratingState.mockRestore()
   })
 })

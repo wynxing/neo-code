@@ -277,7 +277,10 @@ func hydrateFrameSessionFromConnection(ctx context.Context, frame MessageFrame) 
 		return frame
 	}
 
-	frame.SessionID = strings.TrimSpace(relay.ResolveFallbackSessionID(connectionID))
+	frame.SessionID = strings.TrimSpace(relay.ResolveFallbackSessionIDForWorkspace(
+		connectionID,
+		WorkspaceHashFromContext(ctx),
+	))
 	return frame
 }
 

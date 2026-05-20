@@ -38,9 +38,7 @@ func (r *ActionRegistry) initCore() {
 	r.core[FrameActionPing] = func(ctx context.Context, frame MessageFrame, _ RuntimePort) MessageFrame {
 		return handlePingFrame(ctx, frame)
 	}
-	r.core[FrameActionBindStream] = func(ctx context.Context, frame MessageFrame, _ RuntimePort) MessageFrame {
-		return handleBindStreamFrame(ctx, frame)
-	}
+	r.core[FrameActionBindStream] = handleBindStreamFrame
 	r.core[FrameActionAsk] = handleAskFrame
 	r.core[FrameActionDeleteAskSession] = handleDeleteAskSessionFrame
 	r.core[FrameActionTriggerAction] = handleTriggerActionFrame

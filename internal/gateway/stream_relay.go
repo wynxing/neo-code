@@ -50,12 +50,13 @@ type ConnectionRegistration struct {
 
 // StreamBinding 描述连接绑定到会话路由表的一条订阅关系。
 type StreamBinding struct {
-	SessionID string
-	RunID     string
-	Channel   StreamChannel
-	Role      StreamRole
-	State     map[string]any
-	Explicit  bool
+	SessionID     string
+	RunID         string
+	WorkspaceHash string
+	Channel       StreamChannel
+	Role          StreamRole
+	State         map[string]any
+	Explicit      bool
 }
 
 // StreamRelayOptions 描述会话路由与流式中继的可选配置。
@@ -87,14 +88,15 @@ type bindingKey struct {
 }
 
 type bindingState struct {
-	sessionID string
-	runID     string
-	channel   StreamChannel
-	role      StreamRole
-	state     map[string]any
-	explicit  bool
-	expireAt  time.Time
-	lastSeen  time.Time
+	sessionID     string
+	runID         string
+	workspaceHash string
+	channel       StreamChannel
+	role          StreamRole
+	state         map[string]any
+	explicit      bool
+	expireAt      time.Time
+	lastSeen      time.Time
 }
 
 // StreamRelay 维护连接-会话-运行态映射，并负责运行事件的精确中继。
@@ -405,6 +407,11 @@ func (r *StreamRelay) BindConnection(connectionID ConnectionID, binding StreamBi
 		return NewFrameError(ErrorCodeInvalidAction, "bind channel does not match connection channel")
 	}
 
+	workspaceHash := strings.TrimSpace(binding.WorkspaceHash)
+	if workspaceHash == "" {
+		workspaceHash = WorkspaceHashFromContext(connection.ctx)
+	}
+
 	key := bindingKey{sessionID: sessionID, runID: runID}
 	connectionBindingMap := r.connectionBindings[normalizedConnectionID]
 	if connectionBindingMap == nil {
@@ -424,14 +431,15 @@ func (r *StreamRelay) BindConnection(connectionID ConnectionID, binding StreamBi
 		return NewFrameError(ErrorCodeInvalidAction, "too many stream bindings for connection")
 	}
 	connectionBindingMap[key] = &bindingState{
-		sessionID: sessionID,
-		runID:     runID,
-		channel:   channel,
-		role:      role,
-		state:     state,
-		explicit:  binding.Explicit,
-		expireAt:  now.Add(r.bindingTTL),
-		lastSeen:  now,
+		sessionID:     sessionID,
+		runID:         runID,
+		workspaceHash: workspaceHash,
+		channel:       channel,
+		role:          role,
+		state:         state,
+		explicit:      binding.Explicit,
+		expireAt:      now.Add(r.bindingTTL),
+		lastSeen:      now,
 	}
 	r.addConnectionToSessionIndexLocked(sessionID, normalizedConnectionID)
 	if runID != "" {
@@ -443,6 +451,11 @@ func (r *StreamRelay) BindConnection(connectionID ConnectionID, binding StreamBi
 
 // ResolveFallbackSessionID 返回连接当前可用绑定中的会话兜底值（取最近续期的绑定）。
 func (r *StreamRelay) ResolveFallbackSessionID(connectionID ConnectionID) string {
+	return r.ResolveFallbackSessionIDForWorkspace(connectionID, "")
+}
+
+// ResolveFallbackSessionIDForWorkspace 返回指定工作区内最近续期的连接兜底会话。
+func (r *StreamRelay) ResolveFallbackSessionIDForWorkspace(connectionID ConnectionID, workspaceHash string) string {
 	if r == nil {
 		return ""
 	}
@@ -453,6 +466,7 @@ func (r *StreamRelay) ResolveFallbackSessionID(connectionID ConnectionID) string
 	}
 
 	now := time.Now()
+	normalizedWorkspaceHash := strings.TrimSpace(workspaceHash)
 
 	r.mu.RLock()
 	connectionBindingMap := r.connectionBindings[normalizedConnectionID]
@@ -462,6 +476,10 @@ func (r *StreamRelay) ResolveFallbackSessionID(connectionID ConnectionID) string
 	)
 	for _, state := range connectionBindingMap {
 		if state == nil || state.expireAt.Before(now) {
+			continue
+		}
+		if normalizedWorkspaceHash != "" &&
+			!strings.EqualFold(strings.TrimSpace(state.workspaceHash), normalizedWorkspaceHash) {
 			continue
 		}
 		if state.lastSeen.After(latestSeen) {

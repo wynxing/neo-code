@@ -6,6 +6,7 @@ import { useGatewayStore } from '@/stores/useGatewayStore'
 import { useSessionStore, isValidSessionId } from '@/stores/useSessionStore'
 import { useUIStore } from '@/stores/useUIStore'
 import { useWorkspaceStore } from '@/stores/useWorkspaceStore'
+import { useRuntimeInsightStore } from '@/stores/useRuntimeInsightStore'
 import { handleGatewayEvent } from '@/utils/eventBridge'
 
 const browserRuntimeStorageKey = 'neocode.browserRuntimeConfig'
@@ -64,6 +65,57 @@ async function refreshPendingUserQuestion(gatewayAPI: GatewayAPI, sessionId: str
     }
   } catch {
     // best-effort: snapshot 拉取失败不影响主链路
+  }
+}
+
+/** syncWorkspaceContext 将前端选中的工作区恢复到当前 Gateway 连接上下文。 */
+async function syncWorkspaceContext(gatewayAPI: GatewayAPI): Promise<boolean> {
+  const workspaceStore = useWorkspaceStore.getState()
+  await workspaceStore.fetchWorkspaces(gatewayAPI)
+
+  const nextState = useWorkspaceStore.getState()
+  if (nextState.workspaces.length === 0) return false
+
+  const currentHash = nextState.currentWorkspaceHash.trim()
+  const target =
+    nextState.workspaces.find((workspace) => workspace.hash === currentHash) ??
+    nextState.workspaces[0]
+  if (!target?.hash) return false
+
+  if (target.hash !== currentHash) {
+    useWorkspaceStore.getState().setCurrentWorkspaceHash(target.hash)
+    useChatStore.getState().clearMessages()
+    useSessionStore.getState().setCurrentSessionId('')
+    useSessionStore.getState().setCurrentProjectId('')
+    useGatewayStore.getState().setCurrentRunId('')
+    useRuntimeInsightStore.getState().reset()
+    useUIStore.getState().clearFileChanges()
+  }
+
+  await gatewayAPI.switchWorkspace(target.hash)
+  return true
+}
+
+function sessionExistsInProjects(sessionId: string) {
+  return useSessionStore.getState().projects.some((project) =>
+    project.sessions.some((session) => session.id === sessionId),
+  )
+}
+
+async function bindCurrentSessionForReconnect(gatewayAPI: GatewayAPI) {
+  const sessionId = useSessionStore.getState().currentSessionId
+  if (!isValidSessionId(sessionId)) return
+  if (!sessionExistsInProjects(sessionId)) {
+    useSessionStore.getState().setCurrentSessionId('')
+    useSessionStore.getState().setCurrentProjectId('')
+    return
+  }
+  try {
+    await gatewayAPI.bindStream({ session_id: sessionId, channel: 'all' })
+  } catch (err) {
+    console.warn('[RuntimeProvider] Reconnect bindStream skipped stale session:', err)
+    useSessionStore.getState().setCurrentSessionId('')
+    useSessionStore.getState().setCurrentProjectId('')
   }
 }
 
@@ -148,22 +200,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         await api.authenticate(nextConfig.token)
         useGatewayStore.getState().setAuthenticated(true)
 
-        // Re-bind stream for current session (skip temporary IDs)
-        const sessionId = useSessionStore.getState().currentSessionId
-        if (isValidSessionId(sessionId)) {
-          await api.bindStream({ session_id: sessionId, channel: 'all' })
-        }
-
-        // Refresh workspace list (best-effort) and session list
-        try {
-          await useWorkspaceStore.getState().fetchWorkspaces(api)
-        } catch (workspaceErr) {
-          console.warn('[RuntimeProvider] reconnect fetchWorkspaces failed:', workspaceErr)
-        }
-
-        const hasWorkspaces = useWorkspaceStore.getState().workspaces.length > 0
+        const hasWorkspaces = await syncWorkspaceContext(api)
         if (hasWorkspaces) {
           await useSessionStore.getState().fetchSessions(api, true)
+          await bindCurrentSessionForReconnect(api)
         }
         await refreshPendingUserQuestion(api, useSessionStore.getState().currentSessionId)
 
@@ -194,14 +234,14 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       useGatewayStore.getState().setAuthenticated(true)
 
       // Fetch workspaces (best-effort; gracefully degrades if backend not upgraded)
+      let hasWorkspaces = false
       try {
-        await useWorkspaceStore.getState().fetchWorkspaces(api)
+        hasWorkspaces = await syncWorkspaceContext(api)
       } catch (workspaceErr) {
         console.warn('[RuntimeProvider] fetchWorkspaces failed, falling back to single workspace:', workspaceErr)
       }
 
       // Fetch sessions and initialize only when workspaces exist
-      const hasWorkspaces = useWorkspaceStore.getState().workspaces.length > 0
       if (hasWorkspaces) {
         await useSessionStore.getState().fetchSessions(api, true)
         await useSessionStore.getState().initializeActiveSession(api)
