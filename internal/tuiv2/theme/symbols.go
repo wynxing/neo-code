@@ -98,7 +98,7 @@ func StreamPrefix(entryType string) string {
 	switch entryType {
 	case "tool_finished", "tool_end", "run_finished", "run_cancelled":
 		return symbols.Success
-	case "tool_started", "tool_start", "assistant_delta", "run_started", "permission_requested", "question":
+	case "tool_started", "tool_start", "assistant_delta", "agent_chunk", "agent_message_start", "run_started", "permission_requested", "question":
 		return symbols.Running
 	case "error", "gateway_offline":
 		return symbols.Error

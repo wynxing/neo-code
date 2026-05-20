@@ -108,8 +108,8 @@ func TestStreamingChatEventsArriveInOrder(t *testing.T) {
 		t.Fatalf("last event = %q, want %q", got[len(got)-1], gateway.EventRunFinished)
 	}
 	for _, eventType := range got[1 : len(got)-1] {
-		if eventType != gateway.EventAssistantDelta {
-			t.Fatalf("middle event = %q, want %q", eventType, gateway.EventAssistantDelta)
+		if eventType != gateway.EventAgentChunk {
+			t.Fatalf("middle event = %q, want %q", eventType, gateway.EventAgentChunk)
 		}
 	}
 }

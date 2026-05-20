@@ -93,7 +93,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.closed {
 			return a, nil
 		}
-		a.applyGatewayEvent(msg.event)
+		a.state = state.Reduce(a.state, msg.event)
+		a.bindComponents()
+		if a.state.Runtime.Phase == state.RuntimePhaseError && len(a.state.Stream) > 0 {
+			a.lastErr = a.state.Stream[len(a.state.Stream)-1].Content
+		}
 		return a, waitEventCmd(a.eventCh)
 	}
 	return a, a.routeComponents(msg)
@@ -231,36 +235,17 @@ func (a *App) applyInitialLoaded(msg initialLoadedMsg) {
 	}
 }
 
-// applyGatewayEvent 将 Gateway 事件转换为追加式 StreamEntry，并更新运行阶段。
-func (a *App) applyGatewayEvent(event gateway.GatewayEvent) {
-	switch event.Type {
-	case gateway.EventRunStarted, gateway.EventAssistantDelta, gateway.EventToolStarted:
-		a.state.Runtime.Phase = state.RuntimePhaseRunning
-	case gateway.EventPermissionRequested:
-		a.state.Runtime.Phase = state.RuntimePhaseWaitingPermission
-		a.state.Input.Mode = state.InputStateModePermissionResponse
-		a.state.Input.Prompt = payloadText(event.Payload)
-	case gateway.EventUserQuestionRequested:
-		a.state.Runtime.Phase = state.RuntimePhaseWaitingUser
-		a.state.Input.Mode = state.InputStateModeQuestionAnswer
-		a.state.Input.Prompt = payloadText(event.Payload)
-	case gateway.EventRunCancelled:
-		a.state.Runtime.Phase = state.RuntimePhaseCancelled
-	case gateway.EventRunFinished, gateway.EventToolFinished:
-		a.state.Runtime.Phase = state.RuntimePhaseIdle
-	case gateway.EventGatewayOffline, gateway.EventError:
-		a.state.Runtime.Phase = state.RuntimePhaseError
-		a.lastErr = payloadText(event.Payload)
-	}
-	if event.RunID != "" {
-		a.state.Runtime.RunID = event.RunID
-	}
-	a.appendStream(streamEntryFromEvent(event))
-}
-
 // appendStream 以追加新 entry 的方式维护不可变 StreamEntry 序列。
 func (a *App) appendStream(entry state.StreamEntry) {
 	a.state.Stream = append(a.state.Stream, entry)
+}
+
+// bindComponents 将子组件重新绑定到当前 ViewState 指针。
+func (a *App) bindComponents() {
+	a.ambientStatus = components.NewAmbientStatus(a.state)
+	a.agentStream = components.NewAgentStream(a.state)
+	a.commandPrompt = components.NewCommandPrompt(a.state)
+	a.softInspector = components.NewSoftInspector(a.state)
 }
 
 // debugLine 渲染调试模式下的最小运行信息。
@@ -288,42 +273,9 @@ func streamEntryFromItem(item gateway.StreamItem) state.StreamEntry {
 		Metadata: map[string]any{
 			"role":   item.Role,
 			"status": item.Status,
+			"done":   true,
 		},
 	}
-}
-
-// streamEntryFromEvent 将 Gateway 事件 DTO 映射为不可变 StreamEntry。
-func streamEntryFromEvent(event gateway.GatewayEvent) state.StreamEntry {
-	return state.StreamEntry{
-		ID:        fmt.Sprintf("%s:%s:%d", event.Type, event.RunID, len(event.Payload)),
-		Type:      string(event.Type),
-		Timestamp: event.At,
-		Content:   payloadText(event.Payload),
-		ToolName:  fmt.Sprint(event.Payload["tool"]),
-		Metadata:  clonePayload(event.Payload),
-	}
-}
-
-// payloadText 从事件 payload 中提取最适合显示的摘要文本。
-func payloadText(payload map[string]any) string {
-	for _, key := range []string{"text", "message", "phase", "tool", "question"} {
-		if value, ok := payload[key]; ok {
-			return fmt.Sprint(value)
-		}
-	}
-	return ""
-}
-
-// clonePayload 复制事件 payload，避免 StreamEntry 与原事件共享可变 map。
-func clonePayload(payload map[string]any) map[string]any {
-	if len(payload) == 0 {
-		return nil
-	}
-	clone := make(map[string]any, len(payload))
-	for key, value := range payload {
-		clone[key] = value
-	}
-	return clone
 }
 
 // inputModeName 将输入模式转换为占位视图中的稳定文本。

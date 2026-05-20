@@ -117,7 +117,7 @@ func scenarioByName(name string) (fakeScenario, bool) {
 		base.rpcDelay = 80 * time.Millisecond
 		base.events = []scheduledEvent{
 			{after: 40 * time.Millisecond, event: event(gateway.EventRunStarted, defaultSessionID, defaultRunID, payload("phase", "slow start"))},
-			{after: 80 * time.Millisecond, event: event(gateway.EventAssistantDelta, defaultSessionID, defaultRunID, payload("text", "Delayed response arrived."))},
+			{after: 80 * time.Millisecond, event: event(gateway.EventAgentChunk, defaultSessionID, defaultRunID, payload("text", "Delayed response arrived."))},
 			{after: 40 * time.Millisecond, event: event(gateway.EventRunFinished, defaultSessionID, defaultRunID, payload("phase", "done"))},
 		}
 	case ScenarioAskUser:

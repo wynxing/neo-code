@@ -56,7 +56,7 @@ func defaultModels() []gateway.ModelInfo {
 func defaultEvents() []scheduledEvent {
 	return []scheduledEvent{
 		{after: tick, event: event(gateway.EventRunStarted, defaultSessionID, defaultRunID, payload("phase", "running"))},
-		{after: tick, event: event(gateway.EventAssistantDelta, defaultSessionID, defaultRunID, payload("text", "Ghost Console ready."))},
+		{after: tick, event: event(gateway.EventAgentChunk, defaultSessionID, defaultRunID, payload("text", "Ghost Console ready."))},
 		{after: tick, event: event(gateway.EventToolStarted, defaultSessionID, defaultRunID, payload("tool", "filesystem.read"))},
 		{after: tick, event: event(gateway.EventToolFinished, defaultSessionID, defaultRunID, payload("tool", "filesystem.read", "status", "ok"))},
 		{after: tick, event: event(gateway.EventRunFinished, defaultSessionID, defaultRunID, payload("tokens", 384))},
@@ -70,7 +70,7 @@ func streamingEvents() []scheduledEvent {
 	for _, part := range parts {
 		events = append(events, scheduledEvent{
 			after: tick,
-			event: event(gateway.EventAssistantDelta, defaultSessionID, defaultRunID, payload("text", part)),
+			event: event(gateway.EventAgentChunk, defaultSessionID, defaultRunID, payload("text", part)),
 		})
 	}
 	events = append(events, scheduledEvent{after: tick, event: event(gateway.EventRunFinished, defaultSessionID, defaultRunID, payload("phase", "done"))})
@@ -116,7 +116,7 @@ func askUserEvents() []scheduledEvent {
 func cancelRunningEvents() []scheduledEvent {
 	return []scheduledEvent{
 		{after: tick, event: event(gateway.EventRunStarted, defaultSessionID, defaultRunID, payload("phase", "running"))},
-		{after: 2 * tick, event: event(gateway.EventAssistantDelta, defaultSessionID, defaultRunID, payload("text", "Working..."))},
+		{after: 2 * tick, event: event(gateway.EventAgentChunk, defaultSessionID, defaultRunID, payload("text", "Working..."))},
 		{after: tick, event: event(gateway.EventRunCancelled, defaultSessionID, defaultRunID, payload("phase", "cancelled"))},
 	}
 }
