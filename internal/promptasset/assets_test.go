@@ -47,6 +47,7 @@ func TestCorePromptContainsOperationalGuidance(t *testing.T) {
 		"A subagent is a helper, not the source of final truth",
 		"Preserve existing user or repository changes",
 		"Use UTF-8-safe reads and edits",
+		"the current mode permits execution todo updates",
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(prompt, want) {
@@ -89,8 +90,12 @@ func TestPlanModePromptTemplates(t *testing.T) {
 		})
 	}
 
-	if !strings.Contains(PlanModePrompt("plan"), "summary_candidate.active_todo_ids") {
-		t.Fatalf("expected plan prompt to require active todo ownership")
+	if strings.Contains(PlanModePrompt("plan"), "summary_candidate.active_todo_ids") ||
+		strings.Contains(PlanModePrompt("plan"), "must not be empty") {
+		t.Fatalf("expected plan prompt not to require execution todo ownership")
+	}
+	if !strings.Contains(PlanModePrompt("plan"), "Do not create execution todos in plan mode") {
+		t.Fatalf("expected plan prompt to keep todos in build execution")
 	}
 	if !strings.Contains(PlanModePrompt("build_execute"), "create current-run required todos") {
 		t.Fatalf("expected build prompt to require direct-build todo bootstrap")
