@@ -1,0 +1,84 @@
+// Package components 提供 TUI v2 Ghost Console 的静态布局组件。
+package components
+
+import (
+	"fmt"
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"neo-code/internal/tuiv2/state"
+	"neo-code/internal/tuiv2/theme"
+)
+
+const surfaceName = "ghost-console"
+
+// AmbientStatus 渲染连接状态、会话名、模型名、token 用量和运行态摘要。
+type AmbientStatus struct {
+	state *state.ViewState
+}
+
+var _ tea.Model = (*AmbientStatus)(nil)
+
+// NewAmbientStatus 创建顶部环境状态组件。
+func NewAmbientStatus(viewState *state.ViewState) *AmbientStatus {
+	return &AmbientStatus{state: viewState}
+}
+
+// Init 不启动额外命令，组件只读取共享 ViewState。
+func (c *AmbientStatus) Init() tea.Cmd {
+	return nil
+}
+
+// Update 当前不维护组件私有业务状态，只保留 tea.Model 契约。
+func (c *AmbientStatus) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	return c, nil
+}
+
+// View 渲染单行 Ambient Status，不使用边框或药丸标签。
+func (c *AmbientStatus) View() string {
+	parts := []string{
+		theme.AccentStyle().Render("NEOCODE"),
+		c.phase(),
+		theme.MutedStyle().Render(surfaceName),
+		theme.MutedStyle().Render(c.model()),
+		theme.MutedStyle().Render(c.tokens()),
+	}
+	if c.state.Gateway.ActiveSess != nil {
+		parts = append(parts, theme.MutedStyle().Render(c.state.Gateway.ActiveSess.Title))
+	}
+	line := strings.Join(parts, "   ")
+	if c.state.Layout.Width > 0 {
+		return fitBlock(line, c.state.Layout.Width, true)
+	}
+	return line
+}
+
+// phase 根据 Runtime phase 渲染顶部运行态。
+func (c *AmbientStatus) phase() string {
+	phase := c.state.Runtime.Phase
+	switch phase {
+	case state.RuntimePhaseRunning, state.RuntimePhaseWaitingPermission, state.RuntimePhaseWaitingUser:
+		return theme.AccentStyle().Render(theme.StatusSymbol(theme.PhaseRunning) + " " + phase)
+	case state.RuntimePhaseError:
+		return theme.ErrorStyle().Render(theme.StatusSymbol(theme.PhaseError) + " " + phase)
+	case state.RuntimePhaseCancelled:
+		return theme.MutedStyle().Render(theme.StatusSymbol(theme.PhaseCancelled) + " " + phase)
+	default:
+		return theme.SuccessStyle().Render(theme.StatusSymbol(theme.PhaseIdle) + " " + phase)
+	}
+}
+
+// model 返回当前活动模型的显示文本。
+func (c *AmbientStatus) model() string {
+	if c.state.Gateway.ActiveModel != "" {
+		return c.state.Gateway.ActiveModel
+	}
+	return "model:-"
+}
+
+// tokens 返回 token 用量的紧凑显示文本。
+func (c *AmbientStatus) tokens() string {
+	tokens := c.state.Runtime.Tokens
+	return fmt.Sprintf("↑ %d ↓ %d %s %d", tokens.Input, tokens.Output, theme.Separator(), tokens.Total)
+}

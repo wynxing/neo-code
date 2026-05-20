@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NeoCode TUI v2 — Ghost Console Preview</title>
+<style>
+  /* === Reset & Base === */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #0f0f14; }
+
+  body {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+    font-size: 13px;
+    line-height: 1.55;
+    color: #c0caf5;
+  }
+
+  /* === Terminal Surface — no rounded corners, no border, no glass === */
+  .terminal {
+    width: 100%;
+    max-width: 960px;
+    height: 100vh;
+    max-height: 720px;
+    background: #1a1b26;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* === Ambient Status Line === */
+  .ambient {
+    flex-shrink: 0;
+    height: 28px;
+    line-height: 28px;
+    padding: 0 12px;
+    background: #1f2335;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 12px;
+    user-select: none;
+  }
+  .ambient-brand { color: #bb9af7; font-weight: 700; }
+  .ambient-status { display: flex; align-items: center; gap: 5px; }
+  .ambient-status .glyph { font-size: 14px; }
+  .ambient-status .glyph-active { color: #9ece6a; }
+  .ambient-status .text-active { color: #9ece6a; }
+  .ambient-sep { color: #3b4261; }
+  .ambient-mode { color: #e0af68; }
+  .ambient-model { color: #a9b1d6; }
+  .ambient-dir { color: #7dcfff; }
+  .ambient-tokens { margin-left: auto; color: #565f89; font-size: 11px; }
+
+  /* === Stream Area === */
+  .stream {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 12px 16px 12px;
+    scroll-behavior: smooth;
+  }
+  .stream::-webkit-scrollbar { width: 6px; }
+  .stream::-webkit-scrollbar-track { background: transparent; }
+  .stream::-webkit-scrollbar-thumb { background: #3b4261; border-radius: 3px; }
+
+  /* Mission block */
+  .mission { margin-bottom: 12px; }
+  .mission-title { color: #7aa2f7; margin-bottom: 4px; padding-left: 8px; }
+  .mission-item { padding-left: 16px; display: flex; gap: 8px; align-items: baseline; }
+  .mission-item .glyph-done { color: #9ece6a; }
+  .mission-item .glyph-active { color: #9ece6a; }
+  .mission-item .glyph-pending { color: #565f89; }
+  .mission-item .text-done { color: #a9b1d6; }
+  .mission-item .text-active { color: #9ece6a; }
+  .mission-item .text-pending { color: #565f89; }
+
+  /* Stream entries */
+  .entry { margin-bottom: 6px; }
+  .entry-you .label { color: #7dcfff; }
+  .entry-neo .label { color: #7aa2f7; }
+  .entry-tool .label { color: #e0af68; }
+  .entry-file .label { color: #9ece6a; }
+  .entry-event .label { color: #565f89; }
+  .entry-error .label { color: #f7768e; }
+  .entry-thinking .label { color: #565f89; }
+  .entry .label { padding-left: 8px; font-weight: 600; }
+  .entry .body { padding-left: 24px; color: #c0caf5; }
+  .entry .detail { padding-left: 32px; color: #a9b1d6; font-size: 12px; }
+  .entry .detail-line { display: flex; gap: 6px; align-items: baseline; }
+  .entry .detail-ok { color: #9ece6a; }
+  .entry .detail-err { color: #f7768e; }
+  .entry .detail-path { color: #7dcfff; }
+  .entry .detail-meta { color: #565f89; font-size: 11px; }
+
+  /* Soft Inspector (right column, only shown on wide) */
+  .stream.with-inspector { display: flex; gap: 0; }
+  .stream-main { flex: 1; }
+  .soft-inspector { width: 240px; flex-shrink: 0; padding-left: 20px; border-left: 1px solid #1f2335; }
+  .soft-inspector .inspector-block { margin-bottom: 16px; }
+  .soft-inspector .inspector-title { color: #565f89; font-size: 11px; text-transform: lowercase; margin-bottom: 4px; }
+  .soft-inspector .inspector-row { display: flex; justify-content: space-between; font-size: 12px; padding: 1px 0; }
+  .soft-inspector .inspector-key { color: #565f89; }
+  .soft-inspector .inspector-val { color: #a9b1d6; }
+  .soft-inspector .inspector-val-active { color: #9ece6a; }
+  .soft-inspector .inspector-tool { display: flex; gap: 8px; font-size: 11px; padding: 1px 0; }
+  .soft-inspector .inspector-tool .tool-name { color: #e0af68; }
+  .soft-inspector .inspector-tool .tool-status { color: #565f89; }
+  .soft-inspector .inspector-tool .tool-status-running { color: #e0af68; }
+  .soft-inspector .inspector-file { display: flex; gap: 8px; font-size: 11px; padding: 1px 0; }
+  .soft-inspector .inspector-file .file-flag { color: #e0af68; }
+  .soft-inspector .inspector-file .file-path { color: #a9b1d6; }
+  .soft-inspector .inspector-file .file-stat { color: #565f89; }
+
+  /* === Command Prompt === */
+  .prompt-area {
+    flex-shrink: 0;
+    border-top: 1px solid #1f2335;
+    padding: 6px 12px;
+    min-height: 24px;
+  }
+  .prompt-normal { color: #565f89; font-size: 11px; margin-bottom: 3px; }
+  .prompt-normal kbd { color: #7aa2f7; }
+  .prompt-line { display: flex; align-items: center; gap: 6px; }
+  .prompt-symbol { color: #7aa2f7; font-weight: 700; }
+  .prompt-symbol.waiting { color: #e0af68; }
+  .prompt-text { color: #c0caf5; flex: 1; }
+  .prompt-text.dim { color: #565f89; }
+  .prompt-cursor { display: inline-block; width: 8px; height: 15px; background: #c0caf5; animation: blink 1s step-end infinite; vertical-align: middle; margin-left: 1px; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .prompt-hint { color: #565f89; font-size: 11px; }
+
+  /* === Overlays === */
+  .overlay-backdrop {
+    display: none;
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(15, 15, 20, 0.75);
+    z-index: 10;
+    justify-content: center;
+    align-items: center;
+  }
+  .overlay-backdrop.active { display: flex; }
+  .overlay-panel {
+    background: #1a1b26;
+    border: 1px solid #3b4261;
+    min-width: 420px;
+    max-width: 560px;
+    max-height: 400px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+  .overlay-panel::-webkit-scrollbar { width: 6px; }
+  .overlay-panel::-webkit-scrollbar-track { background: transparent; }
+  .overlay-panel::-webkit-scrollbar-thumb { background: #3b4261; border-radius: 3px; }
+
+  /* Telescope palette */
+  .palette-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-bottom: 1px solid #1f2335;
+    color: #a9b1d6;
+  }
+  .palette-search input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: #c0caf5;
+    font-family: inherit;
+    font-size: 13px;
+    outline: none;
+  }
+  .palette-search .prompt-symbol { color: #7aa2f7; }
+  .palette-list { padding: 4px 0; }
+  .palette-item {
+    display: flex;
+    align-items: center;
+    padding: 5px 14px;
+    gap: 12px;
+    cursor: pointer;
+  }
+  .palette-item:hover { background: #1f2335; }
+  .palette-item.active { background: #1f2335; }
+  .palette-item .accent-bar {
+    width: 2px;
+    height: 24px;
+    background: transparent;
+    flex-shrink: 0;
+  }
+  .palette-item.active .accent-bar { background: #7aa2f7; }
+  .palette-item .cmd { color: #bb9af7; min-width: 100px; font-size: 12px; }
+  .palette-item .desc { color: #a9b1d6; flex: 1; }
+  .palette-item .hint { color: #565f89; font-size: 11px; }
+  .palette-footer {
+    padding: 6px 14px;
+    border-top: 1px solid #1f2335;
+    color: #565f89;
+    font-size: 11px;
+    display: flex;
+    gap: 16px;
+  }
+  .palette-footer kbd { color: #a9b1d6; }
+
+  /* Help overlay */
+  .help-section { padding: 10px 14px 4px 14px; }
+  .help-section-title { color: #7aa2f7; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+  .help-row { display: flex; padding: 2px 0; gap: 16px; font-size: 12px; }
+  .help-row .keys { color: #bb9af7; min-width: 130px; }
+  .help-row .action { color: #a9b1d6; }
+  .help-footer {
+    padding: 8px 14px;
+    border-top: 1px solid #1f2335;
+    color: #565f89;
+    font-size: 11px;
+  }
+
+  /* Permission popup */
+  .perm-popup {
+    background: #1a1b26;
+    border: 1px solid #e0af68;
+    padding: 16px 20px;
+    min-width: 300px;
+    max-width: 400px;
+  }
+  .perm-title { color: #e0af68; font-size: 13px; margin-bottom: 4px; }
+  .perm-path { color: #7dcfff; font-size: 12px; margin-bottom: 14px; }
+  .perm-actions { display: flex; gap: 10px; }
+  .perm-btn {
+    padding: 4px 12px;
+    background: transparent;
+    border: 1px solid #3b4261;
+    color: #c0caf5;
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .perm-btn:hover { background: #1f2335; border-color: #7aa2f7; }
+  .perm-btn.allow { border-color: #9ece6a; color: #9ece6a; }
+  .perm-btn.deny { border-color: #f7768e; color: #f7768e; }
+
+  /* === Keyboard hint bar === */
+  .key-hints {
+    position: absolute;
+    bottom: 8px;
+    right: 12px;
+    color: #3b4261;
+    font-size: 10px;
+    display: flex;
+    gap: 12px;
+    user-select: none;
+    z-index: 5;
+  }
+  .key-hints kbd { color: #565f89; }
+</style>
+</head>
+<body>
+
+<div class="terminal" id="terminal">
+  <!-- Ambient Status -->
+  <div class="ambient">
+    <span class="ambient-brand">NEOCODE</span>
+    <span class="ambient-status">
+      <span class="glyph glyph-active">◉</span>
+      <span class="text-active">run</span>
+    </span>
+    <span class="ambient-sep">·</span>
+    <span class="ambient-mode">build</span>
+    <span class="ambient-sep">·</span>
+    <span class="ambient-model">sonnet-4.6</span>
+    <span class="ambient-sep">·</span>
+    <span class="ambient-dir">~/neo-code</span>
+    <span class="ambient-tokens">12.3k</span>
+  </div>
+
+  <!-- Agent Stream -->
+  <div class="stream" id="stream">
+    <!-- Mission Block -->
+    <div class="mission">
+      <div class="mission-title">mission</div>
+      <div class="mission-item">
+        <span class="glyph-done">✓</span>
+        <span class="text-done">scanned current document</span>
+      </div>
+      <div class="mission-item">
+        <span class="glyph-done">✓</span>
+        <span class="text-done">identified visual problem</span>
+      </div>
+      <div class="mission-item">
+        <span class="glyph-active">◉</span>
+        <span class="text-active">removing box-heavy layout</span>
+      </div>
+      <div class="mission-item">
+        <span class="glyph-pending">·</span>
+        <span class="text-pending">drafting ghost console structure</span>
+      </div>
+    </div>
+
+    <!-- You message -->
+    <div class="entry entry-you">
+      <div class="label">you</div>
+      <div class="body">这个布局还是不够酷，线框太多。<br>要极简炫酷，像黑客终端，不要像低配 IDE。</div>
+    </div>
+    <div style="height:4px"></div>
+
+    <!-- Neo message -->
+    <div class="entry entry-neo">
+      <div class="label">neo</div>
+      <div class="body">agreed.<br><br>The visual language should be <span style="color:#e0af68">terminal-native</span>, not dashboard-native.<br><br>NeoCode Ghost Console relies on:</div>
+      <div class="detail">
+        <div class="detail-line"><span style="color:#565f89">·</span> whitespace</div>
+        <div class="detail-line"><span style="color:#565f89">·</span> indentation</div>
+        <div class="detail-line"><span style="color:#565f89">·</span> sharp labels</div>
+        <div class="detail-line"><span style="color:#565f89">·</span> status glyphs</div>
+        <div class="detail-line"><span style="color:#565f89">·</span> subtle color layers</div>
+        <div class="detail-line"><span style="color:#565f89">·</span> flowing event rhythm</div>
+      </div>
+      <div class="body" style="margin-top:4px">not panels. not borders. not cards.</div>
+    </div>
+    <div style="height:8px"></div>
+
+    <!-- Tool call -->
+    <div class="entry entry-tool">
+      <div class="label">tool.read_file</div>
+      <div class="detail">
+        <span class="detail-path">docs/tui-redesign-gateway-contract.md</span>
+        <span class="detail-meta"> · 1485 lines · 31ms</span>
+      </div>
+    </div>
+    <div style="height:4px"></div>
+
+    <!-- Design shift event -->
+    <div class="entry entry-event">
+      <div class="label">design.shift</div>
+      <div class="detail">
+        <div class="detail-line"><span style="color:#565f89">from</span> <span style="color:#a9b1d6">boxed panels</span></div>
+        <div class="detail-line"><span style="color:#565f89">to</span> <span style="color:#9ece6a">ambient console</span></div>
+      </div>
+    </div>
+    <div style="height:8px"></div>
+
+    <!-- File change -->
+    <div class="entry entry-file">
+      <div class="label">file.modified</div>
+      <div class="detail">
+        <span class="detail-path">internal/tui/core/app/view.go</span>
+        <span class="detail-ok">+42</span>
+        <span class="detail-err">-18</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Command Prompt -->
+  <div class="prompt-area" id="prompt-area">
+    <div class="prompt-line">
+      <span class="prompt-symbol">›</span>
+      <span class="prompt-text">继续设计 Ghost Console 布局</span>
+      <span class="prompt-cursor"></span>
+    </div>
+  </div>
+
+  <!-- Key hints -->
+  <div class="key-hints">
+    <span><kbd>?</kbd> help</span>
+    <span><kbd>Ctrl+P</kbd> palette</span>
+    <span><kbd>Esc</kbd> normal</span>
+    <span><kbd>Ctrl+C</kbd> cancel</span>
+  </div>
+
+  <!-- Telescope Palette Overlay -->
+  <div class="overlay-backdrop" id="palette-overlay">
+    <div class="overlay-panel" id="palette-panel">
+      <div class="palette-search">
+        <span class="prompt-symbol">›</span>
+        <input type="text" id="palette-input" placeholder="search commands..." autofocus>
+      </div>
+      <div class="palette-list" id="palette-list">
+        <div class="palette-item active" data-cmd="/model">
+          <span class="accent-bar"></span>
+          <span class="cmd">/model</span>
+          <span class="desc">Change the current model</span>
+          <span class="hint">sonnet-4.6</span>
+        </div>
+        <div class="palette-item" data-cmd="/mode">
+          <span class="accent-bar"></span>
+          <span class="cmd">/mode</span>
+          <span class="desc">Switch between build and plan</span>
+          <span class="hint"></span>
+        </div>
+        <div class="palette-item" data-cmd="/session">
+          <span class="accent-bar"></span>
+          <span class="cmd">/session</span>
+          <span class="desc">Browse and switch sessions</span>
+          <span class="hint"></span>
+        </div>
+        <div class="palette-item" data-cmd="/compact">
+          <span class="accent-bar"></span>
+          <span class="cmd">/compact</span>
+          <span class="desc">Compact current session</span>
+          <span class="hint"></span>
+        </div>
+        <div class="palette-item" data-cmd="/checkpoint">
+          <span class="accent-bar"></span>
+          <span class="cmd">/checkpoint</span>
+          <span class="desc">Manage checkpoints</span>
+          <span class="hint"></span>
+        </div>
+        <div class="palette-item" data-cmd="/skills">
+          <span class="accent-bar"></span>
+          <span class="cmd">/skills</span>
+          <span class="desc">Manage session skills</span>
+          <span class="hint"></span>
+        </div>
+        <div class="palette-item" data-cmd="/help">
+          <span class="accent-bar"></span>
+          <span class="cmd">/help</span>
+          <span class="desc">Show keyboard shortcuts</span>
+          <span class="hint"></span>
+        </div>
+        <div class="palette-item" data-cmd="/exit">
+          <span class="accent-bar"></span>
+          <span class="cmd">/exit</span>
+          <span class="desc">Quit NeoCode</span>
+          <span class="hint"></span>
+        </div>
+      </div>
+      <div class="palette-footer">
+        <span><kbd>↑↓</kbd> navigate</span>
+        <span><kbd>Enter</kbd> execute</span>
+        <span><kbd>Esc</kbd> dismiss</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Help Overlay -->
+  <div class="overlay-backdrop" id="help-overlay">
+    <div class="overlay-panel" id="help-panel">
+      <div class="help-section">
+        <div class="help-section-title">Input Mode</div>
+        <div class="help-row"><span class="keys">Enter</span><span class="action">Send message</span></div>
+        <div class="help-row"><span class="keys">Shift+Enter</span><span class="action">New line</span></div>
+        <div class="help-row"><span class="keys">Ctrl+C</span><span class="action">Cancel agent (double to quit)</span></div>
+        <div class="help-row"><span class="keys">Ctrl+P</span><span class="action">Command palette</span></div>
+        <div class="help-row"><span class="keys">?</span><span class="action">This help</span></div>
+        <div class="help-row"><span class="keys">/</span><span class="action">Slash command (when input empty)</span></div>
+        <div class="help-row"><span class="keys">@</span><span class="action">Attach file reference (when input empty)</span></div>
+      </div>
+      <div class="help-section">
+        <div class="help-section-title">Normal Mode (Esc)</div>
+        <div class="help-row"><span class="keys">i</span><span class="action">Enter Input Mode</span></div>
+        <div class="help-row"><span class="keys">j / k</span><span class="action">Scroll down / up</span></div>
+        <div class="help-row"><span class="keys">Ctrl+D / Ctrl+U</span><span class="action">Half-page down / up</span></div>
+        <div class="help-row"><span class="keys">g / G</span><span class="action">Jump to top / bottom</span></div>
+        <div class="help-row"><span class="keys">/</span><span class="action">Search forward in stream</span></div>
+        <div class="help-row"><span class="keys">:</span><span class="action">Command line</span></div>
+        <div class="help-row"><span class="keys">q</span><span class="action">Quit</span></div>
+      </div>
+      <div class="help-section">
+        <div class="help-section-title">Leader (Space, in Normal Mode)</div>
+        <div class="help-row"><span class="keys">Space p</span><span class="action">Command palette</span></div>
+        <div class="help-row"><span class="keys">Space n</span><span class="action">New session</span></div>
+        <div class="help-row"><span class="keys">Space s</span><span class="action">Switch session</span></div>
+        <div class="help-row"><span class="keys">Space m</span><span class="action">Toggle agent mode</span></div>
+        <div class="help-row"><span class="keys">Space h</span><span class="action">Help</span></div>
+        <div class="help-row"><span class="keys">Space q</span><span class="action">Quit</span></div>
+      </div>
+      <div class="help-section">
+        <div class="help-section-title">Mouse</div>
+        <div class="help-row"><span class="keys">Scroll wheel</span><span class="action">Scroll stream / lists</span></div>
+        <div class="help-row"><span class="keys">Left click</span><span class="action">Select items / position cursor</span></div>
+      </div>
+      <div class="help-footer">
+        <kbd>Esc</kbd> close
+      </div>
+    </div>
+  </div>
+
+  <!-- Permission Popup Overlay -->
+  <div class="overlay-backdrop" id="perm-overlay">
+    <div class="perm-popup">
+      <div class="perm-title">◌ Permission Required</div>
+      <div class="perm-path">allow edit_file on<br>internal/tui/core/app/view.go?</div>
+      <div class="perm-actions">
+        <button class="perm-btn allow" data-action="allow-once">[a] allow once</button>
+        <button class="perm-btn allow" data-action="allow-always">[A] allow always</button>
+        <button class="perm-btn deny" data-action="deny">[d] deny</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // === State ===
+  const state = {
+    mode: 'input', // 'input' | 'normal'
+    paletteOpen: false,
+    helpOpen: false,
+    permOpen: false,
+    paletteIdx: 0,
+    agentRunning: true,
+    ctrlcLast: 0,
+  };
+
+  // === DOM refs ===
+  const terminal = document.getElementById('terminal');
+  const stream = document.getElementById('stream');
+  const promptArea = document.getElementById('prompt-area');
+  const paletteOverlay = document.getElementById('palette-overlay');
+  const helpOverlay = document.getElementById('help-overlay');
+  const permOverlay = document.getElementById('perm-overlay');
+  const paletteInput = document.getElementById('palette-input');
+  const paletteList = document.getElementById('palette-list');
+  const paletteItems = paletteList.querySelectorAll('.palette-item');
+
+  // === Helpers ===
+  function renderPrompt() {
+    if (state.mode === 'normal') {
+      promptArea.innerHTML = `
+        <div class="prompt-normal">
+          <span style="color:#565f89">NORMAL</span>
+          &nbsp;<kbd>i</kbd>:input&nbsp;
+          <kbd>/</kbd>:search&nbsp;
+          <kbd>:</kbd>:command&nbsp;
+          <kbd>q</kbd>:quit&nbsp;
+          <kbd>?</kbd>:help
+        </div>
+        <div class="prompt-line">
+          <span class="prompt-symbol" style="color:#565f89">›</span>
+          <span class="prompt-text dim"></span>
+        </div>`;
+    } else {
+      promptArea.innerHTML = `
+        <div class="prompt-line">
+          <span class="prompt-symbol">›</span>
+          <span class="prompt-text">继续设计 Ghost Console 布局</span>
+          <span class="prompt-cursor"></span>
+        </div>`;
+    }
+  }
+
+  function closeAllOverlays() {
+    paletteOverlay.classList.remove('active');
+    helpOverlay.classList.remove('active');
+    permOverlay.classList.remove('active');
+    state.paletteOpen = false;
+    state.helpOpen = false;
+    state.permOpen = false;
+  }
+
+  function openPalette() {
+    closeAllOverlays();
+    paletteOverlay.classList.add('active');
+    state.paletteOpen = true;
+    state.paletteIdx = 0;
+    updatePaletteActive();
+    paletteInput.value = '';
+    setTimeout(() => paletteInput.focus(), 50);
+  }
+
+  function updatePaletteActive() {
+    paletteItems.forEach((item, i) => {
+      item.classList.toggle('active', i === state.paletteIdx);
+    });
+  }
+
+  function openHelp() {
+    closeAllOverlays();
+    helpOverlay.classList.add('active');
+    state.helpOpen = true;
+  }
+
+  function openPerm() {
+    closeAllOverlays();
+    permOverlay.classList.add('active');
+    state.permOpen = true;
+  }
+
+  function toggleMode() {
+    state.mode = state.mode === 'input' ? 'normal' : 'input';
+    renderPrompt();
+  }
+
+  // === Keyboard handler ===
+  document.addEventListener('keydown', (e) => {
+    // Overlays take priority
+    if (state.paletteOpen) {
+      if (e.key === 'Escape') { e.preventDefault(); closeAllOverlays(); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); state.paletteIdx = (state.paletteIdx + 1) % paletteItems.length; updatePaletteActive(); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); state.paletteIdx = (state.paletteIdx - 1 + paletteItems.length) % paletteItems.length; updatePaletteActive(); return; }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const active = paletteItems[state.paletteIdx];
+        if (active) {
+          const cmd = active.dataset.cmd;
+          closeAllOverlays();
+          promptArea.querySelector('.prompt-text').textContent = cmd + ' ';
+        }
+        return;
+      }
+      // Filter on input
+      if (paletteInput === document.activeElement) return;
+      return;
+    }
+
+    if (state.helpOpen) {
+      if (e.key === 'Escape') { e.preventDefault(); closeAllOverlays(); return; }
+      if (e.key === '?') { e.preventDefault(); closeAllOverlays(); return; }
+      return;
+    }
+
+    if (state.permOpen) {
+      if (e.key === 'a') { e.preventDefault(); closeAllOverlays(); return; }
+      if (e.key === 'A') { e.preventDefault(); closeAllOverlays(); return; }
+      if (e.key === 'd') { e.preventDefault(); closeAllOverlays(); return; }
+      if (e.key === 'Escape') { e.preventDefault(); closeAllOverlays(); return; }
+      return;
+    }
+
+    // Global keys
+    if (e.key === 'Escape' && state.mode === 'input') {
+      e.preventDefault();
+      toggleMode();
+      return;
+    }
+
+    if (state.mode === 'normal') {
+      if (e.key === 'i') { e.preventDefault(); toggleMode(); return; }
+      if (e.key === 'q') { e.preventDefault(); alert('Quit (in real TUI: double-check or Space q)'); return; }
+      if (e.key === '?') { e.preventDefault(); openHelp(); return; }
+      if (e.key === ' ') { e.preventDefault(); /* Leader key — show hint or wait */ return; }
+      if (e.key === ':') { e.preventDefault(); /* Ex command */ return; }
+      return;
+    }
+
+    // Input Mode keys
+    if (e.key === '?' && !e.ctrlKey && !e.metaKey) {
+      // Only if not typing in an actual input
+      if (document.activeElement === document.body || document.activeElement === terminal) {
+        e.preventDefault();
+        openHelp();
+        return;
+      }
+    }
+
+    if (e.key === 'p' && e.ctrlKey && !e.shiftKey) {
+      e.preventDefault();
+      openPalette();
+      return;
+    }
+
+    if (e.key === 'c' && e.ctrlKey) {
+      e.preventDefault();
+      const now = Date.now();
+      if (state.agentRunning) {
+        alert('Agent run cancelled. (Stream would show "run cancelled")');
+        state.agentRunning = false;
+      } else if (now - state.ctrlcLast < 2000) {
+        alert('Quitting NeoCode...');
+      } else {
+        alert('Press Ctrl+C again to quit.');
+        state.ctrlcLast = now;
+      }
+      return;
+    }
+  });
+
+  // === Mouse events ===
+  paletteList.addEventListener('click', (e) => {
+    const item = e.target.closest('.palette-item');
+    if (!item) return;
+    state.paletteIdx = Array.from(paletteItems).indexOf(item);
+    updatePaletteActive();
+    const cmd = item.dataset.cmd;
+    closeAllOverlays();
+    promptArea.querySelector('.prompt-text').textContent = cmd + ' ';
+  });
+
+  permOverlay.addEventListener('click', (e) => {
+    const btn = e.target.closest('.perm-btn');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    closeAllOverlays();
+    // Brief feedback
+    const msg = action === 'deny' ? 'Permission denied.' : 'Permission granted.';
+    alert(msg);
+  });
+
+  // Close overlays on backdrop click
+  [paletteOverlay, helpOverlay, permOverlay].forEach(overlay => {
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closeAllOverlays();
+    });
+  });
+
+  // Scroll stream on load
+  stream.scrollTop = stream.scrollHeight;
+
+  // Init
+  renderPrompt();
+</script>
+
+</body>
+</html>
