@@ -684,7 +684,7 @@ export default function ChatPanel() {
                 className="permission-btn reject"
                 style={{ opacity: isApprovingPlan ? 0.6 : 1 }}
               >
-                <X size={13} /> 拒绝/其它想法
+                <X size={13} /> 需要修改
               </button>
               <button
                 onClick={() => handleApprovePlan('default')}

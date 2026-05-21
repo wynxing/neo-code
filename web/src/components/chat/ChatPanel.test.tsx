@@ -341,7 +341,7 @@ describe('ChatPanel', () => {
     expect(screen.getByText('计划审批')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /同意并以 bypass 执行/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /同意并以 default 执行/ })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /拒绝\/其它想法/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /需要修改/ })).toBeInTheDocument()
   })
 
   it('approves plan with bypass mode and starts build run', async () => {
@@ -398,13 +398,13 @@ describe('ChatPanel', () => {
     expect(useChatStore.getState().permissionMode).toBe('default')
   })
 
-  it('dismisses current plan revision and shows again for a new revision', async () => {
+  it('rejects current plan revision and shows approval again for a new revision', async () => {
     useChatStore.setState({
       messages: [draftPlanMessage(1)],
     } as any)
 
     render(<ChatPanel />)
-    fireEvent.click(screen.getByRole('button', { name: /拒绝\/其它想法/ }))
+    fireEvent.click(screen.getByRole('button', { name: /需要修改/ }))
 
     await waitFor(() => {
       expect(screen.queryByText('计划审批')).not.toBeInTheDocument()

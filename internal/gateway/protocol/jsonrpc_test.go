@@ -343,12 +343,25 @@ func TestNormalizeJSONRPCRequestApprovePlan(t *testing.T) {
 	})
 
 	tests := []struct {
-		name   string
-		params string
+		name            string
+		params          string
+		wantGatewayCode string
 	}{
-		{name: "missing session", params: `{"session_id":" ","plan_id":"plan-1","revision":1}`},
-		{name: "missing plan", params: `{"session_id":"session-1","plan_id":" ","revision":1}`},
-		{name: "invalid revision", params: `{"session_id":"session-1","plan_id":"plan-1","revision":0}`},
+		{
+			name:            "missing session",
+			params:          `{"session_id":" ","plan_id":"plan-1","revision":1}`,
+			wantGatewayCode: GatewayCodeMissingRequiredField,
+		},
+		{
+			name:            "missing plan",
+			params:          `{"session_id":"session-1","plan_id":" ","revision":1}`,
+			wantGatewayCode: GatewayCodeMissingRequiredField,
+		},
+		{
+			name:            "invalid revision",
+			params:          `{"session_id":"session-1","plan_id":"plan-1","revision":0}`,
+			wantGatewayCode: GatewayCodeInvalidAction,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -360,6 +373,9 @@ func TestNormalizeJSONRPCRequestApprovePlan(t *testing.T) {
 			})
 			if rpcErr == nil || rpcErr.Code != JSONRPCCodeInvalidParams {
 				t.Fatalf("expected invalid params error, got %#v", rpcErr)
+			}
+			if gatewayCode := GatewayCodeFromJSONRPCError(rpcErr); gatewayCode != tt.wantGatewayCode {
+				t.Fatalf("gateway_code = %q, want %q", gatewayCode, tt.wantGatewayCode)
 			}
 		})
 	}

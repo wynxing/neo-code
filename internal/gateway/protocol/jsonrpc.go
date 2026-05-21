@@ -1544,7 +1544,7 @@ func decodeApprovePlanParams(raw json.RawMessage) (ApprovePlanParams, *JSONRPCEr
 			return NewJSONRPCError(JSONRPCCodeInvalidParams, "missing required field: params.plan_id", GatewayCodeMissingRequiredField)
 		}
 		if p.Revision <= 0 {
-			return NewJSONRPCError(JSONRPCCodeInvalidParams, "invalid field: params.revision", GatewayCodeInvalidFrame)
+			return NewJSONRPCError(JSONRPCCodeInvalidParams, "invalid field: params.revision", GatewayCodeInvalidAction)
 		}
 		return nil
 	})
