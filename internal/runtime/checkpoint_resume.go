@@ -59,6 +59,7 @@ func (s *Service) applyResumeCheckpoint(ctx context.Context, state *runState) {
 	sessionID := strings.TrimSpace(state.session.ID)
 	workspaceKey := resolveResumeWorkspaceKey(state.session.Workdir, state.effectiveWorkdir)
 	transcriptRevision := sessionTranscriptRevision(state.session)
+	legacyTranscriptRevision := sessionLegacyTranscriptRevision(state.session)
 	state.mu.Unlock()
 	if sessionID == "" {
 		return
@@ -68,7 +69,7 @@ func (s *Service) applyResumeCheckpoint(ctx context.Context, state *runState) {
 	if err != nil || resume == nil {
 		return
 	}
-	if !resumeCheckpointMatchesState(*resume, workspaceKey, transcriptRevision) {
+	if !resumeCheckpointMatchesState(*resume, workspaceKey, transcriptRevision, legacyTranscriptRevision) {
 		return
 	}
 
@@ -114,7 +115,6 @@ func sessionTranscriptRevision(session agentsession.Session) int64 {
 
 	snapshot := resumeConsistencySnapshot{
 		MessageCount:                    len(session.Messages),
-		SessionUpdatedAtUnixMilli:       session.UpdatedAt.UnixMilli(),
 		TodoVersion:                     session.TodoVersion,
 		Todos:                           buildResumeTodoFingerprints(session.Todos),
 		TaskState:                       buildResumeTaskStateFingerprint(session.TaskState),
@@ -138,6 +138,11 @@ func sessionTranscriptRevision(session agentsession.Session) int64 {
 	return int64(hasher.Sum64() & positiveInt64Mask)
 }
 
+// sessionLegacyTranscriptRevision 返回升级前使用的 transcript 版本语义：消息条数。
+func sessionLegacyTranscriptRevision(session agentsession.Session) int64 {
+	return int64(len(session.Messages))
+}
+
 // resolveResumeWorkspaceKey 统一计算 resume checkpoint 的工作区比较键，优先会话 workdir，缺失时回退运行时生效目录。
 func resolveResumeWorkspaceKey(sessionWorkdir string, effectiveWorkdir string) string {
 	workdir := strings.TrimSpace(sessionWorkdir)
@@ -152,6 +157,7 @@ func resumeCheckpointMatchesState(
 	resume agentsession.ResumeCheckpoint,
 	currentWorkspaceKey string,
 	currentTranscriptRevision int64,
+	legacyTranscriptRevision int64,
 ) bool {
 	resumeWorkspaceKey := strings.TrimSpace(resume.WorkspaceKey)
 	workspaceKey := strings.TrimSpace(currentWorkspaceKey)
@@ -165,13 +171,19 @@ func resumeCheckpointMatchesState(
 	if resume.TranscriptRevision < 0 || currentTranscriptRevision < 0 {
 		return false
 	}
-	return resume.TranscriptRevision == currentTranscriptRevision
+	if resume.TranscriptRevision == currentTranscriptRevision {
+		return true
+	}
+	// 兼容升级前 checkpoint：旧语义使用 len(messages)。
+	if legacyTranscriptRevision < 0 {
+		return false
+	}
+	return resume.TranscriptRevision == legacyTranscriptRevision
 }
 
 // resumeConsistencySnapshot 用于构建 resume 一致性指纹，避免仅靠消息数导致的误命中。
 type resumeConsistencySnapshot struct {
 	MessageCount                    int                        `json:"message_count"`
-	SessionUpdatedAtUnixMilli       int64                      `json:"session_updated_at_unix_milli"`
 	TodoVersion                     int                        `json:"todo_version"`
 	Todos                           []resumeTodoFingerprint    `json:"todos,omitempty"`
 	TaskState                       resumeTaskStateFingerprint `json:"task_state"`

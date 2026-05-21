@@ -347,6 +347,7 @@ func TestApplyResumeCheckpointReplayPlanStrategy(t *testing.T) {
 	state := newRunState("run-resume-plan", fixture.session)
 	currentWorkspaceKey := resolveResumeWorkspaceKey(state.session.Workdir, state.effectiveWorkdir)
 	currentTranscriptRevision := sessionTranscriptRevision(state.session)
+	currentLegacyTranscriptRevision := sessionLegacyTranscriptRevision(state.session)
 	spy := &checkpointStoreSpy{
 		latestResume: &agentsession.ResumeCheckpoint{
 			RunID:              "run-old",
@@ -358,7 +359,7 @@ func TestApplyResumeCheckpointReplayPlanStrategy(t *testing.T) {
 			TranscriptRevision: currentTranscriptRevision,
 		},
 	}
-	if !resumeCheckpointMatchesState(*spy.latestResume, currentWorkspaceKey, currentTranscriptRevision) {
+	if !resumeCheckpointMatchesState(*spy.latestResume, currentWorkspaceKey, currentTranscriptRevision, currentLegacyTranscriptRevision) {
 		t.Fatalf("resume checkpoint should match current state in replay-plan strategy case")
 	}
 	service := &Service{
@@ -384,6 +385,7 @@ func TestApplyResumeCheckpointVerifyClosureStrategy(t *testing.T) {
 	state := newRunState("run-resume-verify", fixture.session)
 	currentWorkspaceKey := resolveResumeWorkspaceKey(state.session.Workdir, state.effectiveWorkdir)
 	currentTranscriptRevision := sessionTranscriptRevision(state.session)
+	currentLegacyTranscriptRevision := sessionLegacyTranscriptRevision(state.session)
 	spy := &checkpointStoreSpy{
 		latestResume: &agentsession.ResumeCheckpoint{
 			RunID:              "run-old-verify",
@@ -395,7 +397,7 @@ func TestApplyResumeCheckpointVerifyClosureStrategy(t *testing.T) {
 			TranscriptRevision: currentTranscriptRevision,
 		},
 	}
-	if !resumeCheckpointMatchesState(*spy.latestResume, currentWorkspaceKey, currentTranscriptRevision) {
+	if !resumeCheckpointMatchesState(*spy.latestResume, currentWorkspaceKey, currentTranscriptRevision, currentLegacyTranscriptRevision) {
 		t.Fatalf("resume checkpoint should match current state in verify-closure strategy case")
 	}
 	service := &Service{
@@ -512,6 +514,64 @@ func TestSessionTranscriptRevisionChangesWithoutMessageCountChange(t *testing.T)
 	}
 	if sessionTranscriptRevision(base) == sessionTranscriptRevision(next) {
 		t.Fatalf("expected transcript revision token to change when task/todo state changes without message-count change")
+	}
+}
+
+func TestSessionTranscriptRevisionIgnoresMetadataOnlyUpdatedAt(t *testing.T) {
+	t.Parallel()
+
+	base := agentsession.NewWithWorkdir("resume-token-metadata", t.TempDir())
+	base.Messages = []providertypes.Message{
+		{
+			Role: providertypes.RoleUser,
+			Parts: []providertypes.ContentPart{
+				providertypes.NewTextPart("same"),
+			},
+		},
+	}
+	base.TaskState = agentsession.TaskState{
+		Goal:          "same-goal",
+		LastUpdatedAt: time.Unix(1700001000, 0).UTC(),
+	}
+	base.UpdatedAt = time.Unix(1700002000, 0).UTC()
+
+	next := base
+	next.UpdatedAt = time.Unix(1700009000, 0).UTC()
+
+	if sessionTranscriptRevision(base) != sessionTranscriptRevision(next) {
+		t.Fatalf("expected transcript revision token to ignore metadata-only UpdatedAt changes")
+	}
+}
+
+func TestResumeCheckpointMatchesStateSupportsLegacyMessageCountFallback(t *testing.T) {
+	t.Parallel()
+
+	session := agentsession.NewWithWorkdir("legacy-resume", t.TempDir())
+	session.Messages = []providertypes.Message{
+		{
+			Role: providertypes.RoleUser,
+			Parts: []providertypes.ContentPart{
+				providertypes.NewTextPart("a"),
+			},
+		},
+	}
+	session.TaskState = agentsession.TaskState{
+		Goal:          "legacy fallback",
+		LastUpdatedAt: time.Unix(1700010000, 0).UTC(),
+	}
+	workspaceKey := agentsession.WorkspacePathKey(session.Workdir)
+	currentRevision := sessionTranscriptRevision(session)
+	legacyRevision := sessionLegacyTranscriptRevision(session)
+	if legacyRevision <= 0 {
+		t.Fatalf("legacy transcript revision should be positive, got %d", legacyRevision)
+	}
+
+	resume := agentsession.ResumeCheckpoint{
+		WorkspaceKey:       workspaceKey,
+		TranscriptRevision: legacyRevision,
+	}
+	if !resumeCheckpointMatchesState(resume, workspaceKey, currentRevision, legacyRevision) {
+		t.Fatalf("expected legacy len(messages) checkpoint to match during compatibility fallback")
 	}
 }
 
