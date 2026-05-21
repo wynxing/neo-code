@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ import (
 
 type checkpointStoreSpy struct {
 	lastResume      agentsession.ResumeCheckpoint
+	setResumeErr    error
 	latestResume    *agentsession.ResumeCheckpoint
 	latestResumeErr error
 	listRecords     []agentsession.CheckpointRecord
@@ -56,7 +58,7 @@ func (s *checkpointStoreSpy) RestoreCheckpoint(context.Context, checkpoint.Resto
 
 func (s *checkpointStoreSpy) SetResumeCheckpoint(_ context.Context, rc agentsession.ResumeCheckpoint) error {
 	s.lastResume = rc
-	return nil
+	return s.setResumeErr
 }
 
 func (s *checkpointStoreSpy) PruneExpiredCheckpoints(context.Context, string, int) (int, error) {
@@ -342,17 +344,51 @@ func TestUpdateResumeCheckpoint(t *testing.T) {
 	}
 }
 
+func TestUpdateResumeCheckpointSkipsWhenStoreUnavailable(t *testing.T) {
+	t.Parallel()
+
+	fixture := newRuntimeCheckpointFixture(t)
+	state := newRunState("run-no-store", fixture.session)
+	service := &Service{}
+	service.updateResumeCheckpoint(context.Background(), &state, "plan", "")
+}
+
+func TestUpdateResumeCheckpointSwallowsStoreErrorAndUsesEffectiveWorkdir(t *testing.T) {
+	t.Parallel()
+
+	fixture := newRuntimeCheckpointFixture(t)
+	state := newRunState("run-resume-workdir-fallback", fixture.session)
+	state.session.Workdir = "   "
+	state.effectiveWorkdir = fixture.workdir
+	spy := &checkpointStoreSpy{setResumeErr: errors.New("write failed")}
+	service := &Service{checkpointStore: spy}
+
+	service.updateResumeCheckpoint(context.Background(), &state, "verify", "running")
+
+	if spy.lastResume.WorkspaceKey != agentsession.WorkspacePathKey(fixture.workdir) {
+		t.Fatalf("WorkspaceKey = %q, want %q", spy.lastResume.WorkspaceKey, agentsession.WorkspacePathKey(fixture.workdir))
+	}
+}
+
 func TestApplyResumeCheckpointReplayPlanStrategy(t *testing.T) {
 	fixture := newRuntimeCheckpointFixture(t)
 	state := newRunState("run-resume-plan", fixture.session)
+	currentWorkspaceKey := resolveResumeWorkspaceKey(state.session.Workdir, state.effectiveWorkdir)
+	currentTranscriptRevision := sessionTranscriptRevision(state.session)
+	currentLegacyTranscriptRevision := sessionLegacyTranscriptRevision(state.session)
 	spy := &checkpointStoreSpy{
 		latestResume: &agentsession.ResumeCheckpoint{
-			RunID:           "run-old",
-			SessionID:       fixture.session.ID,
-			Turn:            4,
-			Phase:           "execute",
-			CompletionState: "",
+			RunID:              "run-old",
+			WorkspaceKey:       currentWorkspaceKey,
+			SessionID:          fixture.session.ID,
+			Turn:               4,
+			Phase:              "execute",
+			CompletionState:    "",
+			TranscriptRevision: currentTranscriptRevision,
 		},
+	}
+	if !resumeCheckpointMatchesState(*spy.latestResume, currentWorkspaceKey, currentTranscriptRevision, currentLegacyTranscriptRevision) {
+		t.Fatalf("resume checkpoint should match current state in replay-plan strategy case")
 	}
 	service := &Service{
 		checkpointStore:  spy,
@@ -375,14 +411,22 @@ func TestApplyResumeCheckpointReplayPlanStrategy(t *testing.T) {
 func TestApplyResumeCheckpointVerifyClosureStrategy(t *testing.T) {
 	fixture := newRuntimeCheckpointFixture(t)
 	state := newRunState("run-resume-verify", fixture.session)
+	currentWorkspaceKey := resolveResumeWorkspaceKey(state.session.Workdir, state.effectiveWorkdir)
+	currentTranscriptRevision := sessionTranscriptRevision(state.session)
+	currentLegacyTranscriptRevision := sessionLegacyTranscriptRevision(state.session)
 	spy := &checkpointStoreSpy{
 		latestResume: &agentsession.ResumeCheckpoint{
-			RunID:           "run-old-verify",
-			SessionID:       fixture.session.ID,
-			Turn:            2,
-			Phase:           "verify",
-			CompletionState: "completed",
+			RunID:              "run-old-verify",
+			WorkspaceKey:       currentWorkspaceKey,
+			SessionID:          fixture.session.ID,
+			Turn:               2,
+			Phase:              "verify",
+			CompletionState:    "completed",
+			TranscriptRevision: currentTranscriptRevision,
 		},
+	}
+	if !resumeCheckpointMatchesState(*spy.latestResume, currentWorkspaceKey, currentTranscriptRevision, currentLegacyTranscriptRevision) {
+		t.Fatalf("resume checkpoint should match current state in verify-closure strategy case")
 	}
 	service := &Service{
 		checkpointStore:  spy,
@@ -418,11 +462,13 @@ func TestApplyResumeCheckpointSkipsUnsupportedInputs(t *testing.T) {
 	unsupportedState := newRunState("run-unsupported-resume", fixture.session)
 	service.checkpointStore = &checkpointStoreSpy{
 		latestResume: &agentsession.ResumeCheckpoint{
-			RunID:           "run-unknown",
-			SessionID:       fixture.session.ID,
-			Turn:            1,
-			Phase:           "stopped",
-			CompletionState: "completed",
+			RunID:              "run-unknown",
+			WorkspaceKey:       agentsession.WorkspacePathKey(fixture.session.Workdir),
+			SessionID:          fixture.session.ID,
+			Turn:               1,
+			Phase:              "stopped",
+			CompletionState:    "completed",
+			TranscriptRevision: sessionTranscriptRevision(fixture.session),
 		},
 	}
 	service.applyResumeCheckpoint(context.Background(), &unsupportedState)
@@ -466,11 +512,301 @@ func TestDeriveResumeBaseLifecycle(t *testing.T) {
 	}
 }
 
+func TestSessionTranscriptRevisionChangesWithoutMessageCountChange(t *testing.T) {
+	t.Parallel()
+
+	base := agentsession.NewWithWorkdir("resume-token", t.TempDir())
+	base.Messages = []providertypes.Message{
+		{
+			Role: providertypes.RoleUser,
+			Parts: []providertypes.ContentPart{
+				providertypes.NewTextPart("same-message-count"),
+			},
+		},
+	}
+	base.UpdatedAt = time.Unix(1700000000, 0).UTC()
+	base.TaskState = agentsession.TaskState{
+		Goal:          "implement flow",
+		LastUpdatedAt: time.Unix(1700000001, 0).UTC(),
+	}
+	base.TodoVersion = 1
+
+	next := base
+	next.TaskState.NextStep = "run verification"
+	next.TaskState.LastUpdatedAt = time.Unix(1700000002, 0).UTC()
+	next.UpdatedAt = time.Unix(1700000003, 0).UTC()
+	next.TodoVersion = 2
+
+	if len(base.Messages) != len(next.Messages) {
+		t.Fatalf("message count changed unexpectedly: %d -> %d", len(base.Messages), len(next.Messages))
+	}
+	if sessionTranscriptRevision(base) == sessionTranscriptRevision(next) {
+		t.Fatalf("expected transcript revision token to change when task/todo state changes without message-count change")
+	}
+}
+
+func TestSessionTranscriptRevisionIgnoresMetadataOnlyUpdatedAt(t *testing.T) {
+	t.Parallel()
+
+	base := agentsession.NewWithWorkdir("resume-token-metadata", t.TempDir())
+	base.Messages = []providertypes.Message{
+		{
+			Role: providertypes.RoleUser,
+			Parts: []providertypes.ContentPart{
+				providertypes.NewTextPart("same"),
+			},
+		},
+	}
+	base.TaskState = agentsession.TaskState{
+		Goal:          "same-goal",
+		LastUpdatedAt: time.Unix(1700001000, 0).UTC(),
+	}
+	base.UpdatedAt = time.Unix(1700002000, 0).UTC()
+
+	next := base
+	next.UpdatedAt = time.Unix(1700009000, 0).UTC()
+
+	if sessionTranscriptRevision(base) != sessionTranscriptRevision(next) {
+		t.Fatalf("expected transcript revision token to ignore metadata-only UpdatedAt changes")
+	}
+}
+
+func TestResumeCheckpointMatchesStateSupportsLegacyMessageCountFallback(t *testing.T) {
+	t.Parallel()
+
+	session := agentsession.NewWithWorkdir("legacy-resume", t.TempDir())
+	session.Messages = []providertypes.Message{
+		{
+			Role: providertypes.RoleUser,
+			Parts: []providertypes.ContentPart{
+				providertypes.NewTextPart("a"),
+			},
+		},
+	}
+	session.TaskState = agentsession.TaskState{
+		Goal:          "legacy fallback",
+		LastUpdatedAt: time.Unix(1700010000, 0).UTC(),
+	}
+	workspaceKey := agentsession.WorkspacePathKey(session.Workdir)
+	currentRevision := sessionTranscriptRevision(session)
+	legacyRevision := sessionLegacyTranscriptRevision(session)
+	if legacyRevision <= 0 {
+		t.Fatalf("legacy transcript revision should be positive, got %d", legacyRevision)
+	}
+
+	resume := agentsession.ResumeCheckpoint{
+		WorkspaceKey:       workspaceKey,
+		TranscriptRevision: legacyRevision,
+	}
+	if !resumeCheckpointMatchesState(resume, workspaceKey, currentRevision, legacyRevision) {
+		t.Fatalf("expected legacy len(messages) checkpoint to match during compatibility fallback")
+	}
+}
+
+func TestResolveResumeWorkspaceKey(t *testing.T) {
+	t.Parallel()
+
+	sessionWorkdir := t.TempDir()
+	effectiveWorkdir := t.TempDir()
+	got := resolveResumeWorkspaceKey(sessionWorkdir, effectiveWorkdir)
+	if got != agentsession.WorkspacePathKey(sessionWorkdir) {
+		t.Fatalf("resolveResumeWorkspaceKey(session, effective) = %q, want %q", got, agentsession.WorkspacePathKey(sessionWorkdir))
+	}
+
+	gotFallback := resolveResumeWorkspaceKey("   ", effectiveWorkdir)
+	if gotFallback != agentsession.WorkspacePathKey(effectiveWorkdir) {
+		t.Fatalf("resolveResumeWorkspaceKey(empty, effective) = %q, want %q", gotFallback, agentsession.WorkspacePathKey(effectiveWorkdir))
+	}
+}
+
+func TestResumeCheckpointMatchesStateBranches(t *testing.T) {
+	t.Parallel()
+
+	workspace := agentsession.WorkspacePathKey(t.TempDir())
+	if resumeCheckpointMatchesState(agentsession.ResumeCheckpoint{}, workspace, 1, 1) {
+		t.Fatal("expected empty checkpoint workspace to fail")
+	}
+	if resumeCheckpointMatchesState(agentsession.ResumeCheckpoint{WorkspaceKey: workspace}, "", 1, 1) {
+		t.Fatal("expected empty current workspace to fail")
+	}
+	if resumeCheckpointMatchesState(agentsession.ResumeCheckpoint{WorkspaceKey: workspace + "-other", TranscriptRevision: 1}, workspace, 1, 1) {
+		t.Fatal("expected workspace mismatch to fail")
+	}
+	if resumeCheckpointMatchesState(agentsession.ResumeCheckpoint{WorkspaceKey: workspace, TranscriptRevision: -1}, workspace, 1, 1) {
+		t.Fatal("expected negative checkpoint revision to fail")
+	}
+	if resumeCheckpointMatchesState(agentsession.ResumeCheckpoint{WorkspaceKey: workspace, TranscriptRevision: 1}, workspace, -1, 1) {
+		t.Fatal("expected negative current revision to fail")
+	}
+	if !resumeCheckpointMatchesState(agentsession.ResumeCheckpoint{WorkspaceKey: workspace, TranscriptRevision: 9}, workspace, 9, 3) {
+		t.Fatal("expected exact current revision match to pass")
+	}
+	if resumeCheckpointMatchesState(agentsession.ResumeCheckpoint{WorkspaceKey: workspace, TranscriptRevision: 8}, workspace, 9, -1) {
+		t.Fatal("expected legacy fallback disabled on negative legacy revision")
+	}
+	if resumeCheckpointMatchesState(agentsession.ResumeCheckpoint{WorkspaceKey: workspace, TranscriptRevision: 8}, workspace, 9, 7) {
+		t.Fatal("expected mismatch across current/legacy revisions to fail")
+	}
+}
+
+func TestSessionTranscriptRevisionIncludesTodoAndPlanState(t *testing.T) {
+	t.Parallel()
+
+	required := true
+	base := agentsession.NewWithWorkdir("resume-rich", t.TempDir())
+	base.Messages = []providertypes.Message{
+		{
+			Role: providertypes.RoleUser,
+			Parts: []providertypes.ContentPart{
+				providertypes.NewTextPart("same-count"),
+			},
+		},
+	}
+	base.TodoVersion = 2
+	base.Todos = []agentsession.TodoItem{
+		{
+			ID:            "todo-1",
+			Content:       "prepare report",
+			Status:        agentsession.TodoStatusInProgress,
+			Required:      &required,
+			OwnerType:     agentsession.TodoOwnerTypeAgent,
+			OwnerID:       "agent-1",
+			FailureReason: "",
+			BlockedReason: agentsession.TodoBlockedReasonPermissionWait,
+			Revision:      3,
+			UpdatedAt:     time.Unix(1700020000, 0).UTC(),
+		},
+	}
+	base.TaskState = agentsession.TaskState{
+		VerificationProfile: agentsession.VerificationProfileFixBug,
+		Goal:                "fix bug",
+		Progress:            []string{"  inspect logs  ", "write test"},
+		OpenItems:           []string{"   verify patch"},
+		NextStep:            "  run tests  ",
+		Blockers:            []string{" permission "},
+		KeyArtifacts:        []string{" report.md "},
+		Decisions:           []string{" keep legacy fallback "},
+		UserConstraints:     []string{" no destructive ops "},
+		LastUpdatedAt:       time.Unix(1700020001, 0).UTC(),
+	}
+	base.CurrentPlan = &agentsession.PlanArtifact{
+		ID:       "plan-1",
+		Revision: 2,
+	}
+	base.LastFullPlanRevision = 2
+	base.PlanApprovalPendingFullAlign = true
+
+	cloned := base
+	cloned.TaskState.Progress = append([]string(nil), base.TaskState.Progress...)
+	cloned.TaskState.OpenItems = append([]string(nil), base.TaskState.OpenItems...)
+	cloned.TaskState.Blockers = append([]string(nil), base.TaskState.Blockers...)
+	cloned.TaskState.KeyArtifacts = append([]string(nil), base.TaskState.KeyArtifacts...)
+	cloned.TaskState.Decisions = append([]string(nil), base.TaskState.Decisions...)
+	cloned.TaskState.UserConstraints = append([]string(nil), base.TaskState.UserConstraints...)
+	cloned.Todos = append([]agentsession.TodoItem(nil), base.Todos...)
+	if len(cloned.Todos) > 0 {
+		requiredCopy := *cloned.Todos[0].Required
+		cloned.Todos[0].Required = &requiredCopy
+	}
+
+	before := sessionTranscriptRevision(base)
+	after := sessionTranscriptRevision(cloned)
+	if before != after {
+		t.Fatalf("expected equal revisions for equivalent rich state, got %d vs %d", before, after)
+	}
+
+	cloned.Todos[0].Status = agentsession.TodoStatusCompleted
+	if sessionTranscriptRevision(base) == sessionTranscriptRevision(cloned) {
+		t.Fatal("expected todo status change to affect transcript revision")
+	}
+}
+
+func TestApplyResumeCheckpointSkipsWorkspaceMismatch(t *testing.T) {
+	fixture := newRuntimeCheckpointFixture(t)
+	state := newRunState("run-resume-workspace-mismatch", fixture.session)
+	spy := &checkpointStoreSpy{
+		latestResume: &agentsession.ResumeCheckpoint{
+			RunID:              "run-old",
+			WorkspaceKey:       "workspace://stale",
+			SessionID:          fixture.session.ID,
+			Turn:               1,
+			Phase:              "execute",
+			TranscriptRevision: sessionTranscriptRevision(fixture.session),
+			CompletionState:    "",
+		},
+	}
+	service := &Service{
+		checkpointStore:  spy,
+		events:           make(chan RuntimeEvent, 16),
+		runtimeSnapshots: make(map[string]RuntimeSnapshot),
+	}
+
+	service.applyResumeCheckpoint(context.Background(), &state)
+
+	if state.resumeNextBaseLifecycle != "" {
+		t.Fatalf("resumeNextBaseLifecycle = %q, want empty", state.resumeNextBaseLifecycle)
+	}
+	if strings.TrimSpace(state.pendingSystemReminder) != "" {
+		t.Fatalf("pendingSystemReminder = %q, want empty", state.pendingSystemReminder)
+	}
+	if len(collectRuntimeEvents(service.Events())) != 0 {
+		t.Fatal("expected no runtime events when workspace key mismatches")
+	}
+}
+
+func TestApplyResumeCheckpointSkipsTranscriptRevisionMismatch(t *testing.T) {
+	fixture := newRuntimeCheckpointFixture(t)
+	state := newRunState("run-resume-transcript-mismatch", fixture.session)
+	spy := &checkpointStoreSpy{
+		latestResume: &agentsession.ResumeCheckpoint{
+			RunID:              "run-old",
+			WorkspaceKey:       agentsession.WorkspacePathKey(fixture.session.Workdir),
+			SessionID:          fixture.session.ID,
+			Turn:               1,
+			Phase:              "execute",
+			TranscriptRevision: sessionTranscriptRevision(fixture.session) + 1,
+			CompletionState:    "",
+		},
+	}
+	service := &Service{
+		checkpointStore:  spy,
+		events:           make(chan RuntimeEvent, 16),
+		runtimeSnapshots: make(map[string]RuntimeSnapshot),
+	}
+
+	service.applyResumeCheckpoint(context.Background(), &state)
+
+	if state.resumeNextBaseLifecycle != "" {
+		t.Fatalf("resumeNextBaseLifecycle = %q, want empty", state.resumeNextBaseLifecycle)
+	}
+	if strings.TrimSpace(state.pendingSystemReminder) != "" {
+		t.Fatalf("pendingSystemReminder = %q, want empty", state.pendingSystemReminder)
+	}
+	if len(collectRuntimeEvents(service.Events())) != 0 {
+		t.Fatal("expected no runtime events when transcript revision mismatches")
+	}
+}
+
 func TestServiceRunResumeVerifyClosureBootstrapsFirstTurn(t *testing.T) {
 	t.Parallel()
 
 	manager := newRuntimeConfigManager(t)
 	store := newMemoryStore()
+	seed, err := store.CreateSession(context.Background(), agentsession.CreateSessionInput{
+		ID:    "session-resume-verify",
+		Title: "resume verify seed",
+		Head: agentsession.SessionHead{
+			Provider: "openai",
+			Model:    manager.Get().CurrentModel,
+			Workdir:  manager.Get().Workdir,
+			TaskState: agentsession.TaskState{
+				VerificationProfile: agentsession.VerificationProfileTaskOnly,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
 	providerImpl := &scriptedProvider{
 		responses: []scriptedResponse{
 			{
@@ -486,11 +822,13 @@ func TestServiceRunResumeVerifyClosureBootstrapsFirstTurn(t *testing.T) {
 	}
 	resumeStore := &checkpointStoreSpy{
 		latestResume: &agentsession.ResumeCheckpoint{
-			RunID:           "run-old-verify",
-			SessionID:       "ignored-by-spy",
-			Turn:            2,
-			Phase:           "verify",
-			CompletionState: "completed",
+			RunID:              "run-old-verify",
+			WorkspaceKey:       agentsession.WorkspacePathKey(seed.Workdir),
+			SessionID:          seed.ID,
+			Turn:               2,
+			Phase:              "verify",
+			CompletionState:    "completed",
+			TranscriptRevision: sessionTranscriptRevision(seed),
 		},
 	}
 	service := NewWithFactory(
@@ -505,8 +843,9 @@ func TestServiceRunResumeVerifyClosureBootstrapsFirstTurn(t *testing.T) {
 	service.runtimeSnapshots = make(map[string]RuntimeSnapshot)
 
 	if err := service.Run(context.Background(), UserInput{
-		RunID: "run-resume-verify-first-turn",
-		Parts: []providertypes.ContentPart{providertypes.NewTextPart("continue")},
+		RunID:     "run-resume-verify-first-turn",
+		SessionID: seed.ID,
+		Parts:     []providertypes.ContentPart{providertypes.NewTextPart("continue")},
 	}); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
