@@ -272,11 +272,12 @@ func applyCommandHookUpdateInput(output runtimehooks.RunOutput, parts []provider
 		if update.Text == "" {
 			continue
 		}
+		replaced := false
 		newParts := make([]providertypes.ContentPart, 0, len(parts))
 		for _, part := range parts {
-			if part.Kind == providertypes.ContentPartText {
+			if !replaced && part.Kind == providertypes.ContentPartText {
 				newParts = append(newParts, providertypes.NewTextPart(update.Text))
-				update.Text = "" // 仅替换第一个文本 part
+				replaced = true
 			} else {
 				newParts = append(newParts, part)
 			}

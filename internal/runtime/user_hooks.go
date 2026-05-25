@@ -261,7 +261,7 @@ func validateConfiguredHookItemForP6Lite(item config.RuntimeHookItemConfig, scop
 		if mode != configuredHookModeSync {
 			return fmt.Errorf("mode %q is not supported for kind command (only sync)", item.Mode)
 		}
-		if _, _, err := parseCommandHookParams(item.Params); err != nil {
+		if _, _, err := runtimehooks.ParseCommandParams(item.Params); err != nil {
 			return err
 		}
 	case configuredHookKindHTTP:
@@ -383,7 +383,7 @@ func buildUserBuiltinHookHandler(
 
 // buildUserCommandHookHandler 将命令型 hook 转为同步阻断处理器，使用 stdin/stdout JSON 协议。
 func buildUserCommandHookHandler(hookID string, point runtimehooks.HookPoint, params map[string]any, defaultWorkdir string) (runtimehooks.HookHandler, error) {
-	argv, shell, err := parseCommandHookParams(params)
+	argv, shell, err := runtimehooks.ParseCommandParams(params)
 	if err != nil {
 		return nil, err
 	}
@@ -397,57 +397,6 @@ func buildUserCommandHookHandler(hookID string, point runtimehooks.HookPoint, pa
 		}
 		return runtimehooks.RunCommandHook(ctx, spec, input)
 	}, nil
-}
-
-// parseCommandHookParams 解析 params.command 为 argv 数组，支持 []string / []any / string+shell 三种格式。
-func parseCommandHookParams(params map[string]any) (argv []string, shell bool, err error) {
-	if len(params) == 0 {
-		return nil, false, fmt.Errorf("kind command requires params.command")
-	}
-	raw, ok := params["command"]
-	if !ok || raw == nil {
-		return nil, false, fmt.Errorf("kind command requires params.command")
-	}
-	switch v := raw.(type) {
-	case string:
-		trimmed := strings.TrimSpace(v)
-		if trimmed == "" {
-			return nil, false, fmt.Errorf("kind command requires params.command")
-		}
-		shellVal, _ := params["shell"].(bool)
-		if !shellVal {
-			return nil, false, fmt.Errorf("string params.command requires params.shell=true; use array format for argv mode")
-		}
-		return []string{trimmed}, true, nil
-	case []string:
-		if len(v) == 0 {
-			return nil, false, fmt.Errorf("kind command requires non-empty params.command")
-		}
-		out := make([]string, 0, len(v))
-		for _, s := range v {
-			trimmed := strings.TrimSpace(s)
-			if trimmed == "" {
-				return nil, false, fmt.Errorf("params.command contains empty element")
-			}
-			out = append(out, trimmed)
-		}
-		return out, false, nil
-	case []any:
-		if len(v) == 0 {
-			return nil, false, fmt.Errorf("kind command requires non-empty params.command")
-		}
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			s := strings.TrimSpace(fmt.Sprintf("%v", item))
-			if s == "" {
-				return nil, false, fmt.Errorf("params.command contains empty element")
-			}
-			out = append(out, s)
-		}
-		return out, false, nil
-	default:
-		return nil, false, fmt.Errorf("params.command must be a string (with shell=true) or an array of strings")
-	}
 }
 
 // buildUserHTTPObserveHookHandler 将 kind=http 的 observe 配置转换为观测回调处理器。

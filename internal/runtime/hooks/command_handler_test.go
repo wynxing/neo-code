@@ -546,3 +546,78 @@ func TestRunCommandHookStdinPayload(t *testing.T) {
 		t.Fatalf("stdin payload should contain session_id, got: %s", result.Message)
 	}
 }
+
+func TestRunCommandHookShellModeWindows(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	spec := CommandHookSpec{
+		HookID:  "test-shell-win",
+		Point:   HookPointBeforeToolCall,
+		Command: []string{`Write-Output '{"status":"pass","message":"from powershell shell"}'`},
+		Shell:   true,
+	}
+	result := RunCommandHook(ctx, spec, HookContext{})
+	if result.Status != HookResultPass {
+		t.Fatalf("status = %q, want %q; message: %s", result.Status, HookResultPass, result.Message)
+	}
+	if result.Message != "from powershell shell" {
+		t.Fatalf("message = %q, want %q", result.Message, "from powershell shell")
+	}
+}
+
+func TestRunCommandHookEnvIsolationNoLeak(t *testing.T) {
+	// Verify that host env vars like PATH, HOME, USER are NOT leaked to the subprocess.
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH leaks at system level on Windows; see buildCommandEnv")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	spec := CommandHookSpec{
+		HookID:  "env-no-leak",
+		Point:   HookPointBeforeToolCall,
+		Command: []string{"env"},
+	}
+	result := RunCommandHook(ctx, spec, HookContext{})
+	if result.Status != HookResultPass {
+		t.Fatalf("status = %q, want %q; message: %s", result.Status, HookResultPass, result.Message)
+	}
+	for _, leaked := range []string{"PATH=", "HOME=", "USER="} {
+		if strings.Contains(result.Message, leaked) {
+			t.Fatalf("host env var %q should not be leaked to subprocess, got: %s", leaked, result.Message)
+		}
+	}
+}
+
+func TestValidateCommandParams(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		params  map[string]any
+		wantErr bool
+	}{
+		{"nil params", nil, true},
+		{"empty params", map[string]any{}, true},
+		{"missing command", map[string]any{"other": "val"}, true},
+		{"empty string command", map[string]any{"command": ""}, true},
+		{"string without shell", map[string]any{"command": "echo ok"}, true},
+		{"string with shell", map[string]any{"command": "echo ok", "shell": true}, false},
+		{"empty array", map[string]any{"command": []any{}}, true},
+		{"valid array", map[string]any{"command": []any{"echo", "ok"}}, false},
+		{"array with empty element", map[string]any{"command": []any{"echo", ""}}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateCommandParams(tc.params)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidateCommandParams() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}

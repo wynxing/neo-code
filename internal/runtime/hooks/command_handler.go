@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -14,6 +15,9 @@ import (
 
 // CommandHookPayloadVersion 定义 command hook stdin 协议版本号，变更 stdin 结构时递增。
 const CommandHookPayloadVersion = "1"
+
+// maxCommandStdoutBytes 限制外部命令 stdout 最大读取字节数，防止 OOM。
+const maxCommandStdoutBytes = 1 << 20 // 1 MiB
 
 // CommandHookPayload 是通过 stdin 传给外部命令的单行 JSON。
 type CommandHookPayload struct {
@@ -40,6 +44,66 @@ type CommandHookSpec struct {
 	Command []string // argv 模式: [binary, arg1, arg2, ...]
 	Shell   bool     // true = 通过 sh -c / powershell -Command 执行
 	Workdir string
+}
+
+// ValidateCommandParams 校验 params.command 格式。
+// 支持 []string / []any (argv 模式) 和 string + shell=true (shell 模式)。
+// 此函数是 command hook params 校验的唯一真源，config / runtime 包均应调用此函数。
+func ValidateCommandParams(params map[string]any) error {
+	_, _, err := ParseCommandParams(params)
+	return err
+}
+
+// ParseCommandParams 解析 params.command 为 argv 数组，支持 []string / []any / string+shell 三种格式。
+// 返回解析后的 argv、是否为 shell 模式、以及校验错误。
+func ParseCommandParams(params map[string]any) (argv []string, shell bool, err error) {
+	if len(params) == 0 {
+		return nil, false, fmt.Errorf("kind command requires params.command")
+	}
+	raw, ok := params["command"]
+	if !ok || raw == nil {
+		return nil, false, fmt.Errorf("kind command requires params.command")
+	}
+	switch v := raw.(type) {
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return nil, false, fmt.Errorf("kind command requires params.command")
+		}
+		shellVal, _ := params["shell"].(bool)
+		if !shellVal {
+			return nil, false, fmt.Errorf("string params.command requires params.shell=true; use array format for argv mode")
+		}
+		return []string{trimmed}, true, nil
+	case []string:
+		if len(v) == 0 {
+			return nil, false, fmt.Errorf("kind command requires non-empty params.command")
+		}
+		out := make([]string, 0, len(v))
+		for _, s := range v {
+			trimmed := strings.TrimSpace(s)
+			if trimmed == "" {
+				return nil, false, fmt.Errorf("params.command contains empty element")
+			}
+			out = append(out, trimmed)
+		}
+		return out, false, nil
+	case []any:
+		if len(v) == 0 {
+			return nil, false, fmt.Errorf("kind command requires non-empty params.command")
+		}
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			s := strings.TrimSpace(fmt.Sprintf("%v", item))
+			if s == "" {
+				return nil, false, fmt.Errorf("params.command contains empty element")
+			}
+			out = append(out, s)
+		}
+		return out, false, nil
+	default:
+		return nil, false, fmt.Errorf("params.command must be a string (with shell=true) or an array of strings")
+	}
 }
 
 // BuildCommandPayload 构造传给外部命令的 stdin JSON payload。
@@ -79,6 +143,7 @@ func ParseCommandResponse(raw []byte) (CommandHookResponse, error) {
 }
 
 // RunCommandHook 执行外部命令并返回结构化的 HookResult。
+// stdout 通过管道捕获并限制为 maxCommandStdoutBytes；stderr 捕获后在失败时附加到结果。
 func RunCommandHook(ctx context.Context, spec CommandHookSpec, input HookContext) HookResult {
 	payload := BuildCommandPayload(spec.HookID, spec.Point, input)
 	payloadBytes, err := json.Marshal(payload)
@@ -98,12 +163,25 @@ func RunCommandHook(ctx context.Context, spec CommandHookSpec, input HookContext
 	cmd.Env = buildCommandEnv(spec)
 	cmd.Stdin = bytes.NewReader(payloadBytes)
 
-	stdout, err := cmd.Output()
+	stdout, stderrBytes, runErr := runAndCapture(cmd)
+
+	// stdout 过大视为执行失败
+	if int64(len(stdout)) > maxCommandStdoutBytes {
+		msg := fmt.Sprintf("command hook stdout exceeded %d byte limit", maxCommandStdoutBytes)
+		return HookResult{
+			HookID:  spec.HookID,
+			Point:   spec.Point,
+			Status:  HookResultFailed,
+			Message: msg,
+			Error:   msg,
+		}
+	}
+
 	message := strings.TrimSpace(string(stdout))
 
 	// 非零 exit code 优先于 JSON status（防止恶意脚本声称 pass 但实际失败）
-	if err != nil {
-		return buildResultFromExitCode(ctx, spec, err, message, stdout)
+	if runErr != nil {
+		return buildResultFromExitCode(ctx, spec, runErr, message, stdout, stderrBytes)
 	}
 
 	// exit code 0: 尝试解析 stdout JSON 协议
@@ -121,13 +199,52 @@ func RunCommandHook(ctx context.Context, spec CommandHookSpec, input HookContext
 	}
 }
 
+// runAndCapture 执行命令，通过管道捕获 stdout（限制 maxCommandStdoutBytes），同时捕获 stderr。
+func runAndCapture(cmd *exec.Cmd) (stdout, stderr []byte, runErr error) {
+	cmd.Stderr = &bytes.Buffer{}
+
+	pipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, nil, err
+	}
+
+	// 限制读取量，防止恶意脚本 OOM
+	limitedReader := io.LimitReader(pipe, maxCommandStdoutBytes+1)
+	var stdoutBuf bytes.Buffer
+	_, copyErr := io.Copy(&stdoutBuf, limitedReader)
+	stdout = stdoutBuf.Bytes()
+
+	waitErr := cmd.Wait()
+
+	if stderrBuf, ok := cmd.Stderr.(*bytes.Buffer); ok {
+		stderr = stderrBuf.Bytes()
+	}
+
+	// pipe 读取错误优先
+	if copyErr != nil {
+		return stdout, stderr, fmt.Errorf("reading command stdout: %w", copyErr)
+	}
+
+	return stdout, stderr, waitErr
+}
+
 func buildExecCmd(ctx context.Context, spec CommandHookSpec) *exec.Cmd {
-	if spec.Shell && len(spec.Command) > 0 {
+	if spec.Shell {
+		if len(spec.Command) == 0 {
+			// 不应到达此处（ParseCommandParams 已校验），防御性 panic
+			panic("buildExecCmd: shell mode requires at least one command element")
+		}
 		shell := spec.Command[0]
 		if runtime.GOOS == "windows" {
 			return exec.CommandContext(ctx, "powershell", "-Command", shell)
 		}
 		return exec.CommandContext(ctx, "sh", "-c", shell)
+	}
+	if len(spec.Command) == 0 {
+		panic("buildExecCmd: command requires at least one element")
 	}
 	if len(spec.Command) == 1 {
 		return exec.CommandContext(ctx, spec.Command[0])
@@ -142,8 +259,10 @@ func buildCommandEnv(spec CommandHookSpec) []string {
 		"NEOCODE_HOOK_PAYLOAD_VERSION=" + CommandHookPayloadVersion,
 	}
 	if runtime.GOOS == "windows" {
-		if sd := os.Getenv("SystemDrive"); sd != "" {
-			env = append(env, "SystemDrive="+sd)
+		for _, key := range []string{"SystemRoot", "SystemDrive", "USERPROFILE"} {
+			if v := os.Getenv(key); v != "" {
+				env = append(env, key+"="+v)
+			}
 		}
 	}
 	return env
@@ -176,7 +295,7 @@ func buildResultFromResponse(spec CommandHookSpec, resp CommandHookResponse) Hoo
 	return result
 }
 
-func buildResultFromExitCode(ctx context.Context, spec CommandHookSpec, err error, message string, stdout []byte) HookResult {
+func buildResultFromExitCode(ctx context.Context, spec CommandHookSpec, err error, message string, stdout, stderr []byte) HookResult {
 	result := HookResult{
 		HookID:  spec.HookID,
 		Point:   spec.Point,
@@ -197,6 +316,7 @@ func buildResultFromExitCode(ctx context.Context, spec CommandHookSpec, err erro
 		switch code {
 		case 1, 2:
 			result.Status = HookResultBlock
+			result.Error = err.Error()
 		default:
 			result.Status = HookResultFailed
 			if result.Message == "" {
@@ -219,6 +339,10 @@ func buildResultFromExitCode(ctx context.Context, spec CommandHookSpec, err erro
 		if len(resp.Annotations) > 0 {
 			result.Metadata.Annotations = resp.Annotations
 		}
+	}
+	// 失败时附带 stderr 便于调试
+	if stderrText := strings.TrimSpace(string(stderr)); stderrText != "" && result.Message == "" {
+		result.Message = stderrText
 	}
 	return result
 }

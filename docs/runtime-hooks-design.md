@@ -150,10 +150,11 @@ trust store 固定路径：
   "payload_version": "1",
   "hook_id": "my-hook",
   "point": "before_tool_call",
+  "run_id": "run_abc123",
+  "session_id": "sess_abc123",
   "metadata": {
     "tool_name": "bash",
-    "workdir": "/path/to/workspace",
-    "session_id": "sess_abc123"
+    "workdir": "/path/to/workspace"
   }
 }
 ```
@@ -228,12 +229,37 @@ params:
 | `NEOCODE_HOOK_POINT` | 触发点位（如 `before_tool_call`） |
 | `NEOCODE_HOOK_PAYLOAD_VERSION` | `"1"` |
 
+Windows 额外注入 `SystemRoot`、`SystemDrive`、`USERPROFILE`（从宿主环境读取），以确保 TLS 证书加载和运行时基础功能正常工作。
+
 ### 执行约束
 
 - workdir = 当前 run 的 workspace（`cmd.Dir = workdir`）
 - 超时 = hook 配置的 `timeout_sec`（默认 2s）
 - 并发限制 = executor 的 `max_in_flight`（默认 128）
 - repo scope command hook 受 trust gate 保护
+- stdout 大小限制 = 1 MiB；超出视为 `failed`
+
+### stderr 处理
+
+外部命令的 stderr 与 stdout 分离捕获。stderr 不会混入 `message` 字段，仅在命令执行失败（非零 exit code）且 stdout 无可用 message 时，stderr 内容才作为 fallback 追加到结果中。此设计确保 hook 协议输出（stdout JSON）不受调试输出（stderr）干扰。
+
+### stdin 字段说明
+
+- `run_id` / `session_id` 同时出现在 payload 顶层和 `metadata` 中。**顶层字段为权威来源**，`metadata` 中的同名字段为冗余副本（与 builtin/http hook 的 metadata allowlist 一致）。外部脚本应优先读取顶层字段。
+- `payload_version` 当前固定为 `"1"`，变更 stdin 结构时递增。
+
+### update_input 与 block 交互
+
+当 hook 返回 `status: "block"` 时，`update_input` 不会被应用。阻断优先于输入改写——hook 链在检测到 block 后立即终止，不进入 `applyCommandHookUpdateInput` 逻辑。
+
+### 安全：exit code 优先于 JSON status
+
+当命令以非零 exit code 退出时，stdout 中 JSON 声称的 `status` 字段被忽略。exit code 的映射优先：
+
+- exit 1/2 → `block`
+- 其他非零 → `failed`
+
+此规则防止恶意脚本通过 `{"status":"pass"}` 掩盖实际失败。JSON 中的 `message` 和 `annotations` 仍会被提取（如果 stdout 是合法 JSON）。
 
 ### 示例
 
