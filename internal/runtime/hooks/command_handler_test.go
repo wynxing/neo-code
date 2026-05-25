@@ -3,6 +3,7 @@ package hooks
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -589,6 +590,397 @@ func TestRunCommandHookEnvIsolationNoLeak(t *testing.T) {
 	for _, leaked := range []string{"PATH=", "HOME=", "USER="} {
 		if strings.Contains(result.Message, leaked) {
 			t.Fatalf("host env var %q should not be leaked to subprocess, got: %s", leaked, result.Message)
+		}
+	}
+}
+
+func TestParseCommandParamsAllBranches(t *testing.T) {
+	t.Parallel()
+
+	t.Run("string with shell=true", func(t *testing.T) {
+		t.Parallel()
+		argv, shell, err := ParseCommandParams(map[string]any{"command": "echo hi", "shell": true})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !shell {
+			t.Fatal("expected shell=true")
+		}
+		if len(argv) != 1 || argv[0] != "echo hi" {
+			t.Fatalf("argv = %v, want [echo hi]", argv)
+		}
+	})
+
+	t.Run("string with whitespace shell=true", func(t *testing.T) {
+		t.Parallel()
+		argv, shell, err := ParseCommandParams(map[string]any{"command": "  echo hi  ", "shell": true})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !shell || argv[0] != "echo hi" {
+			t.Fatalf("argv = %v, shell = %v", argv, shell)
+		}
+	})
+
+	t.Run("[]string valid", func(t *testing.T) {
+		t.Parallel()
+		argv, shell, err := ParseCommandParams(map[string]any{"command": []string{"echo", "hello"}})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if shell {
+			t.Fatal("expected shell=false for array")
+		}
+		if len(argv) != 2 || argv[0] != "echo" || argv[1] != "hello" {
+			t.Fatalf("argv = %v", argv)
+		}
+	})
+
+	t.Run("[]string empty", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := ParseCommandParams(map[string]any{"command": []string{}})
+		if err == nil {
+			t.Fatal("expected error for empty []string")
+		}
+	})
+
+	t.Run("[]string with empty element", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := ParseCommandParams(map[string]any{"command": []string{"echo", "  ", "ok"}})
+		if err == nil {
+			t.Fatal("expected error for empty element in []string")
+		}
+	})
+
+	t.Run("[]any with empty element after Sprintf", func(t *testing.T) {
+		t.Parallel()
+		// nil element => fmt.Sprintf("%v", nil) => "<nil>" which is non-empty
+		// but empty string element => fmt.Sprintf("%v", "") => "" which is empty
+		_, _, err := ParseCommandParams(map[string]any{"command": []any{"echo", ""}})
+		if err == nil {
+			t.Fatal("expected error for empty element in []any")
+		}
+	})
+
+	t.Run("unsupported type", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := ParseCommandParams(map[string]any{"command": 123})
+		if err == nil {
+			t.Fatal("expected error for unsupported type")
+		}
+	})
+
+	t.Run("nil command value", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := ParseCommandParams(map[string]any{"command": nil})
+		if err == nil {
+			t.Fatal("expected error for nil command")
+		}
+	})
+
+	t.Run("shell=false on string", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := ParseCommandParams(map[string]any{"command": "echo ok", "shell": false})
+		if err == nil {
+			t.Fatal("expected error for string without shell=true")
+		}
+	})
+}
+
+func TestRunCommandHookStdoutTooLarge(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// Generate output slightly above the 1MiB limit
+	var spec CommandHookSpec
+	if runtime.GOOS == "windows" {
+		spec = CommandHookSpec{
+			HookID:  "stdout-toolarge",
+			Point:   HookPointBeforeToolCall,
+			Command: []string{"powershell", "-Command", "Write-Output ('x' * 1048577)"},
+		}
+	} else {
+		spec = CommandHookSpec{
+			HookID:  "stdout-toolarge",
+			Point:   HookPointBeforeToolCall,
+			Command: []string{"sh", "-c", "printf '%1048577s' ''"},
+		}
+	}
+	result := RunCommandHook(ctx, spec, HookContext{})
+	if result.Status != HookResultFailed {
+		t.Fatalf("status = %q, want %q", result.Status, HookResultFailed)
+	}
+	if !strings.Contains(result.Message, "byte limit") {
+		t.Fatalf("message should mention byte limit, got: %s", result.Message)
+	}
+}
+
+func TestRunCommandHookStdinPayloadWithMetadata(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var spec CommandHookSpec
+	if runtime.GOOS == "windows" {
+		spec = CommandHookSpec{
+			HookID:  "stdin-meta",
+			Point:   HookPointUserPromptSubmit,
+			Command: []string{"powershell", "-Command", "$input"},
+		}
+	} else {
+		spec = CommandHookSpec{
+			HookID:  "stdin-meta",
+			Point:   HookPointUserPromptSubmit,
+			Command: []string{"cat"},
+		}
+	}
+	result := RunCommandHook(ctx, spec, HookContext{
+		RunID:     "run-meta",
+		SessionID: "sess-meta",
+		Metadata:  map[string]any{"tool_name": "bash", "workdir": "/tmp"},
+	})
+	if result.Status != HookResultPass {
+		t.Fatalf("status = %q, want %q", result.Status, HookResultPass)
+	}
+	if !strings.Contains(result.Message, `"tool_name"`) {
+		t.Fatalf("stdin should contain tool_name metadata, got: %s", result.Message)
+	}
+}
+
+func TestRunCommandHookExitCodeTwoBlocks(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var spec CommandHookSpec
+	if runtime.GOOS == "windows" {
+		spec = CommandHookSpec{
+			HookID:  "exit2",
+			Point:   HookPointBeforeToolCall,
+			Command: []string{"powershell", "-Command", "exit 2"},
+		}
+	} else {
+		spec = CommandHookSpec{
+			HookID:  "exit2",
+			Point:   HookPointBeforeToolCall,
+			Command: []string{"sh", "-c", "exit 2"},
+		}
+	}
+	result := RunCommandHook(ctx, spec, HookContext{})
+	if result.Status != HookResultBlock {
+		t.Fatalf("status = %q, want %q", result.Status, HookResultBlock)
+	}
+	if result.Error == "" {
+		t.Fatal("expected Error to be set for exit code 2 block")
+	}
+}
+
+func TestRunCommandHookExitCodeZeroEmptyStdout(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var spec CommandHookSpec
+	if runtime.GOOS == "windows" {
+		spec = CommandHookSpec{
+			HookID:  "exit0-empty",
+			Point:   HookPointBeforeToolCall,
+			Command: []string{"powershell", "-Command", ""},
+		}
+	} else {
+		spec = CommandHookSpec{
+			HookID:  "exit0-empty",
+			Point:   HookPointBeforeToolCall,
+			Command: []string{"true"},
+		}
+	}
+	result := RunCommandHook(ctx, spec, HookContext{})
+	if result.Status != HookResultPass {
+		t.Fatalf("status = %q, want %q", result.Status, HookResultPass)
+	}
+}
+
+func TestRunCommandHookNonExistentBinary(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	spec := CommandHookSpec{
+		HookID:  "no-such-binary",
+		Point:   HookPointBeforeToolCall,
+		Command: []string{"nonexistent_binary_xyz_12345"},
+	}
+	result := RunCommandHook(ctx, spec, HookContext{})
+	if result.Status != HookResultFailed {
+		t.Fatalf("status = %q, want %q", result.Status, HookResultFailed)
+	}
+	if result.Error == "" {
+		t.Fatal("expected Error to be set for nonexistent binary")
+	}
+}
+
+func TestRunCommandHookBlockWithMessage(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var spec CommandHookSpec
+	if runtime.GOOS == "windows" {
+		spec = CommandHookSpec{
+			HookID:  "block-msg",
+			Point:   HookPointBeforeToolCall,
+			Command: []string{"powershell", "-Command", "Write-Output '{\"status\":\"block\",\"message\":\"not allowed\"}'"},
+		}
+	} else {
+		spec = CommandHookSpec{
+			HookID:  "block-msg",
+			Point:   HookPointBeforeToolCall,
+			Command: []string{"echo", `{"status":"block","message":"not allowed"}`},
+		}
+	}
+	result := RunCommandHook(ctx, spec, HookContext{})
+	if result.Status != HookResultBlock {
+		t.Fatalf("status = %q, want %q", result.Status, HookResultBlock)
+	}
+	if result.Message != "not allowed" {
+		t.Fatalf("message = %q, want %q", result.Message, "not allowed")
+	}
+}
+
+func TestRunCommandHookFailedStatusWithDefaultMessage(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var spec CommandHookSpec
+	if runtime.GOOS == "windows" {
+		spec = CommandHookSpec{
+			HookID:  "failed-default",
+			Point:   HookPointBeforeToolCall,
+			Command: []string{"powershell", "-Command", "Write-Output '{\"status\":\"failed\"}'"},
+		}
+	} else {
+		spec = CommandHookSpec{
+			HookID:  "failed-default",
+			Point:   HookPointBeforeToolCall,
+			Command: []string{"echo", `{"status":"failed"}`},
+		}
+	}
+	result := RunCommandHook(ctx, spec, HookContext{})
+	if result.Status != HookResultFailed {
+		t.Fatalf("status = %q, want %q", result.Status, HookResultFailed)
+	}
+	if result.Message != "hook returned failed status" {
+		t.Fatalf("message = %q, want default failed message", result.Message)
+	}
+	if result.Error != "hook returned failed status" {
+		t.Fatalf("error = %q, want default failed message", result.Error)
+	}
+}
+
+func TestRunCommandHookFailedStatusWithCustomMessage(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var spec CommandHookSpec
+	if runtime.GOOS == "windows" {
+		spec = CommandHookSpec{
+			HookID:  "failed-custom",
+			Point:   HookPointBeforeToolCall,
+			Command: []string{"powershell", "-Command", "Write-Output '{\"status\":\"failed\",\"message\":\"custom error\"}'"},
+		}
+	} else {
+		spec = CommandHookSpec{
+			HookID:  "failed-custom",
+			Point:   HookPointBeforeToolCall,
+			Command: []string{"echo", `{"status":"failed","message":"custom error"}`},
+		}
+	}
+	result := RunCommandHook(ctx, spec, HookContext{})
+	if result.Status != HookResultFailed {
+		t.Fatalf("status = %q, want %q", result.Status, HookResultFailed)
+	}
+	if result.Message != "custom error" {
+		t.Fatalf("message = %q, want %q", result.Message, "custom error")
+	}
+	if result.Error != "custom error" {
+		t.Fatalf("error = %q, want %q", result.Error, "custom error")
+	}
+}
+
+func TestRunCommandHookPassWithAnnotationsAndUpdateInput(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	payload := `{"status":"pass","message":"ok","annotations":["a1","a2"],"update_input":{"text":"rewritten"}}`
+	var spec CommandHookSpec
+	if runtime.GOOS == "windows" {
+		spec = CommandHookSpec{
+			HookID:  "full-output",
+			Point:   HookPointUserPromptSubmit,
+			Command: []string{"powershell", "-Command", fmt.Sprintf("Write-Output '%s'", payload)},
+		}
+	} else {
+		spec = CommandHookSpec{
+			HookID:  "full-output",
+			Point:   HookPointUserPromptSubmit,
+			Command: []string{"echo", payload},
+		}
+	}
+	result := RunCommandHook(ctx, spec, HookContext{})
+	if result.Status != HookResultPass {
+		t.Fatalf("status = %q, want %q", result.Status, HookResultPass)
+	}
+	if result.Message != "ok" {
+		t.Fatalf("message = %q, want %q", result.Message, "ok")
+	}
+	if len(result.Metadata.Annotations) != 2 || result.Metadata.Annotations[0] != "a1" {
+		t.Fatalf("annotations = %v, want [a1 a2]", result.Metadata.Annotations)
+	}
+	if len(result.Metadata.UpdateInput) == 0 {
+		t.Fatal("expected UpdateInput to be populated")
+	}
+}
+
+func TestRunCommandHookExitCodeThreeWithStderr(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var spec CommandHookSpec
+	if runtime.GOOS == "windows" {
+		spec = CommandHookSpec{
+			HookID:  "exit3-stderr",
+			Point:   HookPointBeforeToolCall,
+			Command: []string{"powershell", "-Command", "Write-Error 'bad thing'; exit 3"},
+		}
+	} else {
+		spec = CommandHookSpec{
+			HookID:  "exit3-stderr",
+			Point:   HookPointBeforeToolCall,
+			Command: []string{"sh", "-c", "echo bad thing >&2; exit 3"},
+		}
+	}
+	result := RunCommandHook(ctx, spec, HookContext{})
+	if result.Status != HookResultFailed {
+		t.Fatalf("status = %q, want %q", result.Status, HookResultFailed)
+	}
+}
+
+func TestBuildCommandEnvContainsNEOCODEVars(t *testing.T) {
+	t.Parallel()
+	spec := CommandHookSpec{HookID: "id-env", Point: HookPointSessionStart}
+	env := buildCommandEnv(spec)
+	envMap := make(map[string]bool)
+	for _, e := range env {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) == 2 {
+			envMap[parts[0]] = true
+		}
+	}
+	for _, key := range []string{"NEOCODE_HOOK_HOOK_ID", "NEOCODE_HOOK_POINT", "NEOCODE_HOOK_PAYLOAD_VERSION"} {
+		if !envMap[key] {
+			t.Fatalf("missing %s in env", key)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		for _, key := range []string{"SystemRoot", "SystemDrive", "USERPROFILE"} {
+			if os.Getenv(key) != "" && !envMap[key] {
+				t.Fatalf("missing Windows env var %s", key)
+			}
 		}
 	}
 }
