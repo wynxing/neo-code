@@ -618,6 +618,49 @@ func TestRuntimeHasWarnOnToolCallTargetsBranches(t *testing.T) {
 	}
 }
 
+func TestValidateRepoHookItemAllowsWarnOnToolCallWithMatchOnly(t *testing.T) {
+	t.Parallel()
+
+	item := config.RuntimeHookItemConfig{
+		ID:            "repo-warn-match",
+		Point:         "before_tool_call",
+		Scope:         "repo",
+		Kind:          "builtin",
+		Mode:          "sync",
+		Handler:       "warn_on_tool_call",
+		TimeoutSec:    2,
+		FailurePolicy: "warn_only",
+		Match: map[string]any{
+			"tool_name": "bash",
+		},
+	}
+	if err := validateRepoHookItem(item); err != nil {
+		t.Fatalf("validateRepoHookItem() error = %v", err)
+	}
+}
+
+func TestValidateRepoHookItemRejectsUnsupportedMatcherDimension(t *testing.T) {
+	t.Parallel()
+
+	item := config.RuntimeHookItemConfig{
+		ID:            "repo-session-match",
+		Point:         "session_start",
+		Scope:         "repo",
+		Kind:          "builtin",
+		Mode:          "sync",
+		Handler:       "add_context_note",
+		TimeoutSec:    2,
+		FailurePolicy: "warn_only",
+		Params:        map[string]any{"note": "repo"},
+		Match: map[string]any{
+			"tool_name": "bash",
+		},
+	}
+	if err := validateRepoHookItem(item); err == nil {
+		t.Fatal("expected unsupported matcher dimension to fail")
+	}
+}
+
 func TestResolveRepoHooksPathBranches(t *testing.T) {
 	workspace := t.TempDir()
 	hooksPath := filepath.Join(workspace, ".neocode", "hooks.yaml")

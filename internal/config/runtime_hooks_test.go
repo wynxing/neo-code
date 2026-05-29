@@ -489,6 +489,65 @@ func TestRuntimeHooksConfigValidateWarnOnToolCallRequiresTarget(t *testing.T) {
 	}
 }
 
+func TestRuntimeHooksConfigValidateWarnOnToolCallAllowsMatchWithoutLegacyTargets(t *testing.T) {
+	t.Parallel()
+
+	cfg := RuntimeHooksConfig{
+		Enabled:              boolPtr(true),
+		UserHooksEnabled:     boolPtr(true),
+		DefaultTimeoutSec:    2,
+		DefaultFailurePolicy: runtimeHookFailurePolicyWarnOnly,
+		Items: []RuntimeHookItemConfig{
+			{
+				ID:            "warn-with-match",
+				Point:         string(hooks.HookPointBeforeToolCall),
+				Scope:         runtimeHookScopeUser,
+				Kind:          runtimeHookKindBuiltIn,
+				Mode:          runtimeHookModeSync,
+				Handler:       runtimeHookHandlerWarnOnToolCall,
+				TimeoutSec:    2,
+				FailurePolicy: runtimeHookFailurePolicyWarnOnly,
+				Match: map[string]any{
+					"tool_name": "bash",
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestRuntimeHooksConfigValidateRejectsUnsupportedMatcherDimensionForPoint(t *testing.T) {
+	t.Parallel()
+
+	cfg := RuntimeHooksConfig{
+		Enabled:              boolPtr(true),
+		UserHooksEnabled:     boolPtr(true),
+		DefaultTimeoutSec:    2,
+		DefaultFailurePolicy: runtimeHookFailurePolicyWarnOnly,
+		Items: []RuntimeHookItemConfig{
+			{
+				ID:            "session-start-match",
+				Point:         string(hooks.HookPointSessionStart),
+				Scope:         runtimeHookScopeUser,
+				Kind:          runtimeHookKindBuiltIn,
+				Mode:          runtimeHookModeSync,
+				Handler:       runtimeHookHandlerAddContextNote,
+				TimeoutSec:    2,
+				FailurePolicy: runtimeHookFailurePolicyWarnOnly,
+				Params:        map[string]any{"note": "observe"},
+				Match: map[string]any{
+					"tool_name": "bash",
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected unsupported matcher dimension to fail validation")
+	}
+}
+
 func TestRuntimeHooksConfigEdgeBranches(t *testing.T) {
 	t.Parallel()
 
@@ -619,6 +678,20 @@ func TestRuntimeHooksConfigEdgeBranches(t *testing.T) {
 		}
 		if hasWarnOnToolCallTargets(map[string]any{"tool_names": "bash"}) {
 			t.Fatal("tool_names scalar should fail")
+		}
+
+		matchCfg := RuntimeHookItemConfig{
+			Match: map[string]any{
+				"tool_name_regex": []any{`^bash$`},
+			},
+		}
+		clonedCfg := matchCfg.Clone()
+		clonedRegexes := clonedCfg.Match["tool_name_regex"].([]any)
+		clonedRegexes[0] = "^filesystem$"
+		clonedCfg.Match["tool_name_regex"] = clonedRegexes
+		originalRegexes := matchCfg.Match["tool_name_regex"].([]any)
+		if originalRegexes[0] == "^filesystem$" {
+			t.Fatal("expected match field to be deep-cloned")
 		}
 	})
 }

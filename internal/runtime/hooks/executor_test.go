@@ -955,10 +955,11 @@ func TestExecutorSanitizeUserHookContext(t *testing.T) {
 		RunID:     "run-1",
 		SessionID: "session-1",
 		Metadata: map[string]any{
-			"tool_name":        "bash",
-			"tool_arguments":   "--secret-token=abc",
-			"capability_token": "should-not-leak",
-			"workdir":          "/tmp/work",
+			"tool_name":              "bash",
+			"tool_arguments":         "--secret-token=abc",
+			"tool_arguments_preview": "token=***",
+			"capability_token":       "should-not-leak",
+			"workdir":                "/tmp/work",
 		},
 	})
 
@@ -970,6 +971,9 @@ func TestExecutorSanitizeUserHookContext(t *testing.T) {
 	}
 	if _, exists := captured.Metadata["tool_arguments"]; exists {
 		t.Fatal("tool_arguments should be stripped for user hook context")
+	}
+	if got := captured.Metadata["tool_arguments_preview"]; got != "token=***" {
+		t.Fatalf("tool_arguments_preview = %v, want token=***", got)
 	}
 	if _, exists := captured.Metadata["capability_token"]; exists {
 		t.Fatal("capability_token should be stripped for user hook context")
@@ -999,10 +1003,11 @@ func TestExecutorSanitizeRepoHookContext(t *testing.T) {
 		RunID:     "run-1",
 		SessionID: "session-1",
 		Metadata: map[string]any{
-			"tool_name":        "bash",
-			"tool_arguments":   "--secret-token=abc",
-			"capability_token": "should-not-leak",
-			"workdir":          "/tmp/work",
+			"tool_name":              "bash",
+			"tool_arguments":         "--secret-token=abc",
+			"tool_arguments_preview": "token=***",
+			"capability_token":       "should-not-leak",
+			"workdir":                "/tmp/work",
 		},
 	})
 
@@ -1012,7 +1017,76 @@ func TestExecutorSanitizeRepoHookContext(t *testing.T) {
 	if _, exists := captured.Metadata["tool_arguments"]; exists {
 		t.Fatal("tool_arguments should be stripped for repo hook context")
 	}
+	if got := captured.Metadata["tool_arguments_preview"]; got != "token=***" {
+		t.Fatalf("tool_arguments_preview = %v, want token=***", got)
+	}
 	if _, exists := captured.Metadata["capability_token"]; exists {
 		t.Fatal("capability_token should be stripped for repo hook context")
+	}
+}
+
+func TestExecutorSkipsHookWhenMatcherMissed(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry()
+	executor := NewExecutor(registry, nil, 100*time.Millisecond)
+	if err := registry.Register(HookSpec{
+		ID:      "matcher-hook",
+		Point:   HookPointBeforeToolCall,
+		Scope:   HookScopeUser,
+		Matcher: &HookMatcher{ToolNames: []string{"bash"}},
+		Handler: func(context.Context, HookContext) HookResult {
+			return HookResult{Status: HookResultPass, Message: "should-not-run"}
+		},
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	output := executor.Run(context.Background(), HookPointBeforeToolCall, HookContext{
+		Metadata: map[string]any{"tool_name": "filesystem"},
+	})
+	if output.Blocked {
+		t.Fatalf("Blocked = true, want false")
+	}
+	if len(output.Results) != 0 {
+		t.Fatalf("len(Results) = %d, want 0 when matcher missed", len(output.Results))
+	}
+}
+
+func TestExecutorEmitsMatcherMigrationWarningOnce(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry()
+	emitter := &recordingEmitter{}
+	executor := NewExecutor(registry, emitter, 100*time.Millisecond)
+	if err := registry.Register(HookSpec{
+		ID:                      "matcher-warning-hook",
+		Point:                   HookPointBeforeToolCall,
+		Scope:                   HookScopeUser,
+		Source:                  HookSourceUser,
+		MatcherMigrationWarning: "matcher migration warning",
+		Handler: func(context.Context, HookContext) HookResult {
+			return HookResult{Status: HookResultPass}
+		},
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	_ = executor.Run(context.Background(), HookPointBeforeToolCall, HookContext{})
+	_ = executor.Run(context.Background(), HookPointBeforeToolCall, HookContext{})
+
+	events := emitter.snapshot()
+	warningCount := 0
+	for _, event := range events {
+		if event.Type != HookEventNotification {
+			continue
+		}
+		warningCount++
+		if event.RewakeReason != "matcher_migration" {
+			t.Fatalf("notification reason = %q, want matcher_migration", event.RewakeReason)
+		}
+	}
+	if warningCount != 1 {
+		t.Fatalf("matcher migration warning count = %d, want 1", warningCount)
 	}
 }

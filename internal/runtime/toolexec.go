@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +22,12 @@ type indexedToolCall struct {
 	index int
 	call  providertypes.ToolCall
 }
+
+const hookToolArgumentsPreviewMaxChars = 512
+
+var hookToolArgumentsSensitivePattern = regexp.MustCompile(
+	`(?i)(token|password|secret|api[_-]?key|access[_-]?key|auth)\s*[:=]\s*("[^"]*"|'[^']*'|[^\s]+)`,
+)
 
 // executeAssistantToolCalls 并发执行 assistant 返回的全部工具调用并返回结构化执行摘要。
 func (s *Service) executeAssistantToolCalls(
@@ -160,10 +167,11 @@ func (s *Service) executeOneToolCallWithoutPersistence(
 
 	beforeToolHookOutput := s.runHookPoint(ctx, state, runtimehooks.HookPointBeforeToolCall, runtimehooks.HookContext{
 		Metadata: map[string]any{
-			"tool_call_id":   strings.TrimSpace(call.ID),
-			"tool_name":      strings.TrimSpace(call.Name),
-			"tool_arguments": strings.TrimSpace(call.Arguments),
-			"workdir":        strings.TrimSpace(snapshot.Workdir),
+			"tool_call_id":           strings.TrimSpace(call.ID),
+			"tool_name":              strings.TrimSpace(call.Name),
+			"tool_arguments":         strings.TrimSpace(call.Arguments),
+			"tool_arguments_preview": buildToolArgumentsPreview(call.Arguments),
+			"workdir":                strings.TrimSpace(snapshot.Workdir),
 		},
 	})
 	if beforeToolHookOutput.Blocked {
@@ -752,6 +760,28 @@ func summarizeHookResultContent(content string) string {
 	return trimmed[:256]
 }
 
+// buildToolArgumentsPreview 生成 matcher 可用的参数预览，并对敏感键值执行脱敏。
+func buildToolArgumentsPreview(arguments string) string {
+	trimmed := strings.TrimSpace(arguments)
+	if trimmed == "" {
+		return ""
+	}
+	masked := hookToolArgumentsSensitivePattern.ReplaceAllString(trimmed, `$1=***`)
+	return truncateHookTextByChars(masked, hookToolArgumentsPreviewMaxChars)
+}
+
+// truncateHookTextByChars 按字符长度截断文本，避免 metadata 放大。
+func truncateHookTextByChars(text string, maxChars int) string {
+	if maxChars <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= maxChars {
+		return text
+	}
+	return string(runes[:maxChars])
+}
+
 // extractTodoIDsFromPayload 提取 todo 事件快照中的条目 ID，用于冲突事实去重统计。
 func extractTodoIDsFromPayload(items []TodoViewItem) []string {
 	if len(items) == 0 {
@@ -828,11 +858,12 @@ func (s *Service) emitAfterToolFailureHook(
 	workdir string,
 ) {
 	afterToolFailureMetadata := map[string]any{
-		"tool_call_id": strings.TrimSpace(call.ID),
-		"tool_name":    strings.TrimSpace(call.Name),
-		"is_error":     result.IsError,
-		"error_class":  strings.TrimSpace(result.ErrorClass),
-		"workdir":      strings.TrimSpace(workdir),
+		"tool_call_id":           strings.TrimSpace(call.ID),
+		"tool_name":              strings.TrimSpace(call.Name),
+		"tool_arguments_preview": buildToolArgumentsPreview(call.Arguments),
+		"is_error":               result.IsError,
+		"error_class":            strings.TrimSpace(result.ErrorClass),
+		"workdir":                strings.TrimSpace(workdir),
 	}
 	if execErr != nil {
 		afterToolFailureMetadata["execution_error"] = strings.TrimSpace(execErr.Error())

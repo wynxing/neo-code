@@ -834,8 +834,12 @@ func TestBuildUserBuiltinHookHandlerEdgeCases(t *testing.T) {
 	if _, err := buildUserBuiltinHookHandler("require_file_exists", map[string]any{}, t.TempDir()); err == nil {
 		t.Fatal("expected missing path error")
 	}
-	if _, err := buildUserBuiltinHookHandler("warn_on_tool_call", map[string]any{}, t.TempDir()); err == nil {
-		t.Fatal("expected missing target error")
+	handlerWithoutTarget, err := buildUserBuiltinHookHandler("warn_on_tool_call", map[string]any{}, t.TempDir())
+	if err != nil {
+		t.Fatalf("build warn_on_tool_call without target error: %v", err)
+	}
+	if got := handlerWithoutTarget(context.Background(), runtimehooks.HookContext{}); got.Message == "" {
+		t.Fatalf("expected default warning message when no target is configured, got %+v", got)
 	}
 	if _, err := buildUserBuiltinHookHandler("add_context_note", map[string]any{}, t.TempDir()); err == nil {
 		t.Fatal("expected missing note/message error")
@@ -1349,6 +1353,82 @@ func TestConfigureRuntimeHooksInjectsAsyncResultSinkIntoBaseExecutor(t *testing.
 	t.Fatal("expected async rewake notification to be enqueued via configured async sink")
 }
 
+func TestBuildUserHookSpecBridgesWarnOnToolCallLegacyParamsToMatcher(t *testing.T) {
+	t.Parallel()
+
+	item := config.RuntimeHookItemConfig{
+		ID:            "warn-legacy",
+		Point:         "before_tool_call",
+		Scope:         "user",
+		Kind:          "builtin",
+		Mode:          "sync",
+		Handler:       "warn_on_tool_call",
+		TimeoutSec:    2,
+		FailurePolicy: "warn_only",
+		Params: map[string]any{
+			"tool_names": []any{"bash"},
+			"message":    "legacy warning",
+		},
+	}
+
+	spec, err := buildUserHookSpec(item, t.TempDir())
+	if err != nil {
+		t.Fatalf("buildUserHookSpec() error = %v", err)
+	}
+	if spec.Matcher == nil {
+		t.Fatal("expected legacy warn_on_tool_call params to be bridged into matcher")
+	}
+	if spec.Matcher.Match(runtimehooks.HookContext{Metadata: map[string]any{"tool_name": "filesystem"}}) {
+		t.Fatal("matcher should reject unmatched tool")
+	}
+	if !spec.Matcher.Match(runtimehooks.HookContext{Metadata: map[string]any{"tool_name": "bash"}}) {
+		t.Fatal("matcher should accept configured legacy tool")
+	}
+}
+
+func TestBuildUserHookSpecWarnOnToolCallMatchTakesPrecedenceAndEmitsMigrationWarning(t *testing.T) {
+	t.Parallel()
+
+	item := config.RuntimeHookItemConfig{
+		ID:            "warn-conflict",
+		Point:         "before_tool_call",
+		Scope:         "user",
+		Kind:          "builtin",
+		Mode:          "sync",
+		Handler:       "warn_on_tool_call",
+		TimeoutSec:    2,
+		FailurePolicy: "warn_only",
+		Match: map[string]any{
+			"tool_name": "filesystem",
+		},
+		Params: map[string]any{
+			"tool_name": "bash",
+			"message":   "explicit matcher wins",
+		},
+	}
+
+	spec, err := buildUserHookSpec(item, t.TempDir())
+	if err != nil {
+		t.Fatalf("buildUserHookSpec() error = %v", err)
+	}
+	if spec.Matcher == nil {
+		t.Fatal("expected matcher to be compiled")
+	}
+	if spec.MatcherMigrationWarning == "" {
+		t.Fatal("expected migration warning when match and legacy warn params coexist")
+	}
+	if !spec.Matcher.Match(runtimehooks.HookContext{Metadata: map[string]any{"tool_name": "filesystem"}}) {
+		t.Fatal("matcher should follow explicit match config")
+	}
+	if spec.Matcher.Match(runtimehooks.HookContext{Metadata: map[string]any{"tool_name": "bash"}}) {
+		t.Fatal("legacy params should be ignored when explicit match exists")
+	}
+	result := spec.Handler(context.Background(), runtimehooks.HookContext{Metadata: map[string]any{"tool_name": "filesystem"}})
+	if result.Message != "explicit matcher wins" {
+		t.Fatalf("handler message = %q, want explicit matcher wins", result.Message)
+	}
+}
+
 type countingHookExecutor struct {
 	calls  atomic.Int32
 	output runtimehooks.RunOutput
@@ -1518,8 +1598,8 @@ func TestUserHookHandlersAndPathChecks(t *testing.T) {
 	if _, err := buildUserBuiltinHookHandler("require_file_exists", map[string]any{}, workdir); err == nil {
 		t.Fatal("expected missing path error")
 	}
-	if _, err := buildUserBuiltinHookHandler("warn_on_tool_call", map[string]any{}, workdir); err == nil {
-		t.Fatal("expected missing tool target error")
+	if _, err := buildUserBuiltinHookHandler("warn_on_tool_call", map[string]any{}, workdir); err != nil {
+		t.Fatalf("warn_on_tool_call without target should be allowed for matcher-based filtering: %v", err)
 	}
 	if _, err := buildUserBuiltinHookHandler("add_context_note", map[string]any{}, workdir); err == nil {
 		t.Fatal("expected missing note/message error")

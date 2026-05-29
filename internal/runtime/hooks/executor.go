@@ -23,6 +23,7 @@ type Executor struct {
 	defaultTimeout time.Duration
 	maxInFlight    int32
 	inFlight       atomic.Int32
+	migrationWarns sync.Map
 	now            func() time.Time
 	asyncSink      AsyncResultSink
 }
@@ -79,6 +80,10 @@ func (e *Executor) Run(ctx context.Context, point HookPoint, input HookContext) 
 		if spec.Scope == HookScopeUser || spec.Scope == HookScopeRepo {
 			hookInput = sanitizeUserHookContext(hookInput)
 		}
+		e.emitMatcherMigrationWarning(ctx, spec)
+		if spec.Matcher != nil && !spec.Matcher.Match(hookInput) {
+			continue
+		}
 		if spec.Mode == HookModeAsync || spec.Mode == HookModeAsyncRewake {
 			e.runAsync(ctx, spec, hookInput)
 			continue
@@ -101,6 +106,43 @@ func (e *Executor) Run(ctx context.Context, point HookPoint, input HookContext) 
 		}
 	}
 	return output
+}
+
+// emitMatcherMigrationWarning 在 detect 到旧 warn_on_tool_call 参数与 match 共存时发出一次迁移提示事件。
+func (e *Executor) emitMatcherMigrationWarning(ctx context.Context, spec HookSpec) {
+	if e == nil {
+		return
+	}
+	message := strings.TrimSpace(spec.MatcherMigrationWarning)
+	if message == "" {
+		return
+	}
+	dedupeKey := strings.ToLower(strings.TrimSpace(
+		fmt.Sprintf("%s|%s|%s|%s", spec.ID, spec.Point, spec.Scope, spec.Source),
+	))
+	if dedupeKey == "" {
+		dedupeKey = strings.ToLower(strings.TrimSpace(spec.ID))
+	}
+	if dedupeKey == "" {
+		dedupeKey = "matcher_migration_warning"
+	}
+	if _, loaded := e.migrationWarns.LoadOrStore(dedupeKey, struct{}{}); loaded {
+		return
+	}
+	e.emitBestEffort(ctx, HookEvent{
+		Type:          HookEventNotification,
+		HookID:        spec.ID,
+		Point:         spec.Point,
+		Scope:         spec.Scope,
+		Source:        spec.Source,
+		Kind:          spec.Kind,
+		Mode:          spec.Mode,
+		Status:        HookResultPass,
+		Message:       message,
+		RewakeReason:  "matcher_migration",
+		RewakeSummary: message,
+		DedupeKey:     dedupeKey,
+	})
 }
 
 // normalizeHookResultByCapability 根据 HookPoint 能力矩阵约束单条结果。
@@ -340,6 +382,7 @@ func sanitizeUserHookContext(input HookContext) HookContext {
 		"point":                   {},
 		"tool_call_id":            {},
 		"tool_name":               {},
+		"tool_arguments_preview":  {},
 		"is_error":                {},
 		"error_class":             {},
 		"result_content_preview":  {},

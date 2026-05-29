@@ -197,48 +197,55 @@ func buildConfiguredHookSpec(
 	if err := validateConfiguredHookItemForP6Lite(item, scope); err != nil {
 		return runtimehooks.HookSpec{}, err
 	}
+	point := runtimehooks.HookPoint(strings.TrimSpace(item.Point))
+	matcher, matcherWarning, sanitizedParams, err := buildConfiguredHookMatcher(item, point)
+	if err != nil {
+		return runtimehooks.HookSpec{}, err
+	}
 	kind := strings.ToLower(strings.TrimSpace(item.Kind))
 	specKind := runtimehooks.HookKindFunction
 	specMode := runtimehooks.HookModeSync
 	var (
-		handler runtimehooks.HookHandler
-		err     error
+		handler  runtimehooks.HookHandler
+		buildErr error
 	)
 	switch kind {
 	case configuredHookKindBuiltin:
-		handler, err = buildUserBuiltinHookHandler(strings.TrimSpace(item.Handler), item.Params, defaultWorkdir)
+		handler, buildErr = buildUserBuiltinHookHandler(strings.TrimSpace(item.Handler), sanitizedParams, defaultWorkdir)
 		specKind = runtimehooks.HookKindFunction
 		specMode = runtimehooks.HookModeSync
 	case configuredHookKindCommand:
-		handler, err = buildUserCommandHookHandler(
+		handler, buildErr = buildUserCommandHookHandler(
 			strings.TrimSpace(item.ID),
-			runtimehooks.HookPoint(strings.TrimSpace(item.Point)),
+			point,
 			item.Params,
 			defaultWorkdir,
 		)
 		specKind = runtimehooks.HookKindCommand
 		specMode = runtimehooks.HookModeSync
 	case configuredHookKindHTTP:
-		handler, err = buildUserHTTPObserveHookHandler(item)
+		handler, buildErr = buildUserHTTPObserveHookHandler(item)
 		specKind = runtimehooks.HookKindHTTP
 		specMode = runtimehooks.HookModeObserve
 	default:
 		return runtimehooks.HookSpec{}, fmt.Errorf("kind %q is not supported", item.Kind)
 	}
-	if err != nil {
-		return runtimehooks.HookSpec{}, err
+	if buildErr != nil {
+		return runtimehooks.HookSpec{}, buildErr
 	}
 	return runtimehooks.HookSpec{
-		ID:            strings.TrimSpace(item.ID),
-		Point:         runtimehooks.HookPoint(strings.TrimSpace(item.Point)),
-		Scope:         scope,
-		Source:        source,
-		Kind:          specKind,
-		Mode:          specMode,
-		Priority:      item.Priority,
-		Timeout:       time.Duration(item.TimeoutSec) * time.Second,
-		FailurePolicy: mapRuntimeHookFailurePolicy(item.FailurePolicy),
-		Handler:       handler,
+		ID:                      strings.TrimSpace(item.ID),
+		Point:                   point,
+		Scope:                   scope,
+		Source:                  source,
+		Kind:                    specKind,
+		Mode:                    specMode,
+		Priority:                item.Priority,
+		Timeout:                 time.Duration(item.TimeoutSec) * time.Second,
+		FailurePolicy:           mapRuntimeHookFailurePolicy(item.FailurePolicy),
+		Handler:                 handler,
+		Matcher:                 matcher,
+		MatcherMigrationWarning: matcherWarning,
 	}, nil
 }
 
@@ -257,12 +264,28 @@ func validateConfiguredHookItemForP6Lite(item config.RuntimeHookItemConfig, scop
 		if mode != configuredHookModeSync {
 			return fmt.Errorf("mode %q is not supported", item.Mode)
 		}
+		handler := strings.ToLower(strings.TrimSpace(item.Handler))
+		hasExplicitMatcher := runtimehooks.HasHookMatcherConfig(item.Match)
+		if handler == "warn_on_tool_call" && !hasExplicitMatcher && !runtimeHasWarnOnToolCallTargets(item.Params) {
+			return fmt.Errorf("handler %q requires match or params.tool_name/tool_names", item.Handler)
+		}
+		matcherRaw := resolveConfiguredHookMatcherRaw(item)
+		if matcherRaw != nil {
+			if err := runtimehooks.ValidateHookMatcher(runtimehooks.HookPoint(strings.TrimSpace(item.Point)), matcherRaw); err != nil {
+				return fmt.Errorf("match: %w", err)
+			}
+		}
 	case configuredHookKindCommand:
 		if mode != configuredHookModeSync {
 			return fmt.Errorf("mode %q is not supported for kind command (only sync)", item.Mode)
 		}
 		if _, _, err := runtimehooks.ParseCommandParams(item.Params); err != nil {
 			return err
+		}
+		if runtimehooks.HasHookMatcherConfig(item.Match) {
+			if err := runtimehooks.ValidateHookMatcher(runtimehooks.HookPoint(strings.TrimSpace(item.Point)), item.Match); err != nil {
+				return fmt.Errorf("match: %w", err)
+			}
 		}
 	case configuredHookKindHTTP:
 		if mode != configuredHookModeObserve {
@@ -271,6 +294,11 @@ func validateConfiguredHookItemForP6Lite(item config.RuntimeHookItemConfig, scop
 		policy := strings.ToLower(strings.TrimSpace(item.FailurePolicy))
 		if policy == "fail_closed" {
 			return fmt.Errorf("failure_policy %q is not supported for kind http observe", item.FailurePolicy)
+		}
+		if runtimehooks.HasHookMatcherConfig(item.Match) {
+			if err := runtimehooks.ValidateHookMatcher(runtimehooks.HookPoint(strings.TrimSpace(item.Point)), item.Match); err != nil {
+				return fmt.Errorf("match: %w", err)
+			}
 		}
 	default:
 		if isExternalHookKind(kind) {
@@ -282,6 +310,106 @@ func validateConfiguredHookItemForP6Lite(item config.RuntimeHookItemConfig, scop
 		return fmt.Errorf("kind %q is not supported", item.Kind)
 	}
 	return nil
+}
+
+// resolveConfiguredHookMatcherRaw 返回运行时装配阶段应使用的 matcher 原始配置。
+func resolveConfiguredHookMatcherRaw(item config.RuntimeHookItemConfig) map[string]any {
+	if runtimehooks.HasHookMatcherConfig(item.Match) {
+		return item.Match
+	}
+	if strings.EqualFold(strings.TrimSpace(item.Handler), "warn_on_tool_call") &&
+		runtimeHasWarnOnToolCallTargets(item.Params) {
+		return buildLegacyWarnMatcherFromParams(item.Params)
+	}
+	return nil
+}
+
+// buildConfiguredHookMatcher 编译 hook matcher 并生成迁移告警，同时返回供 handler 使用的参数副本。
+func buildConfiguredHookMatcher(
+	item config.RuntimeHookItemConfig,
+	point runtimehooks.HookPoint,
+) (*runtimehooks.HookMatcher, string, map[string]any, error) {
+	sanitizedParams := cloneHookParams(item.Params)
+	matcherRaw := resolveConfiguredHookMatcherRaw(item)
+	if matcherRaw == nil {
+		return nil, "", sanitizedParams, nil
+	}
+	matcher, err := runtimehooks.CompileHookMatcher(point, matcherRaw)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("match: %w", err)
+	}
+	if matcher == nil {
+		return nil, "", sanitizedParams, nil
+	}
+	explicitMatcher := runtimehooks.HasHookMatcherConfig(item.Match)
+	legacyWarnTargets := strings.EqualFold(strings.TrimSpace(item.Handler), "warn_on_tool_call") &&
+		runtimeHasWarnOnToolCallTargets(item.Params)
+	warning := ""
+	if explicitMatcher && legacyWarnTargets {
+		warning = "hook matcher migration: match is configured; params.tool_name/tool_names on warn_on_tool_call are ignored"
+		delete(sanitizedParams, "tool_name")
+		delete(sanitizedParams, "tool_names")
+	}
+	return matcher, warning, sanitizedParams, nil
+}
+
+// cloneHookParams 深拷贝 params，避免装配阶段修改影响原始配置对象。
+func cloneHookParams(params map[string]any) map[string]any {
+	if len(params) == 0 {
+		return nil
+	}
+	cloned := make(map[string]any, len(params))
+	for key, value := range params {
+		cloned[key] = cloneHookParamValue(value)
+	}
+	return cloned
+}
+
+// cloneHookParamValue 深拷贝 matcher/params 结构，避免 map/slice 底层共享。
+func cloneHookParamValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		cloned := make(map[string]any, len(typed))
+		for key, item := range typed {
+			cloned[key] = cloneHookParamValue(item)
+		}
+		return cloned
+	case []any:
+		cloned := make([]any, len(typed))
+		for index, item := range typed {
+			cloned[index] = cloneHookParamValue(item)
+		}
+		return cloned
+	case []string:
+		cloned := make([]string, len(typed))
+		copy(cloned, typed)
+		return cloned
+	default:
+		return value
+	}
+}
+
+// buildLegacyWarnMatcherFromParams 将 warn_on_tool_call 旧参数桥接为 matcher 配置。
+func buildLegacyWarnMatcherFromParams(params map[string]any) map[string]any {
+	if len(params) == 0 {
+		return nil
+	}
+	var toolNames []string
+	if name := strings.TrimSpace(readHookParamString(params, "tool_name")); name != "" {
+		toolNames = append(toolNames, name)
+	}
+	for _, value := range readHookParamStringSlice(params, "tool_names") {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		toolNames = append(toolNames, value)
+	}
+	if len(toolNames) == 0 {
+		return nil
+	}
+	return map[string]any{
+		"tool_name": toolNames,
+	}
 }
 
 func isExternalHookKind(kind string) bool {
@@ -342,9 +470,6 @@ func buildUserBuiltinHookHandler(
 	case "warn_on_tool_call":
 		targetTool := strings.ToLower(strings.TrimSpace(readHookParamString(params, "tool_name")))
 		targetTools := normalizeHookParamStringSlice(readHookParamStringSlice(params, "tool_names"))
-		if targetTool == "" && len(targetTools) == 0 {
-			return nil, fmt.Errorf("handler warn_on_tool_call requires params.tool_name or params.tool_names")
-		}
 		defaultMessage := "tool call matched warn_on_tool_call"
 		if customMessage := strings.TrimSpace(readHookParamString(params, "message")); customMessage != "" {
 			defaultMessage = customMessage
@@ -352,6 +477,9 @@ func buildUserBuiltinHookHandler(
 		return func(ctx context.Context, input runtimehooks.HookContext) runtimehooks.HookResult {
 			_ = ctx
 			toolName := strings.ToLower(strings.TrimSpace(readHookContextMetadataString(input, "tool_name")))
+			if targetTool == "" && len(targetTools) == 0 {
+				return runtimehooks.HookResult{Status: runtimehooks.HookResultPass, Message: defaultMessage}
+			}
 			if toolName == "" {
 				return runtimehooks.HookResult{Status: runtimehooks.HookResultPass}
 			}

@@ -64,6 +64,7 @@ type RuntimeHookItemConfig struct {
 	Kind          string         `yaml:"kind,omitempty"`
 	Mode          string         `yaml:"mode,omitempty"`
 	Handler       string         `yaml:"handler,omitempty"`
+	Match         map[string]any `yaml:"match,omitempty"`
 	Priority      int            `yaml:"priority,omitempty"`
 	TimeoutSec    int            `yaml:"timeout_sec,omitempty"`
 	FailurePolicy string         `yaml:"failure_policy,omitempty"`
@@ -189,6 +190,12 @@ func (c RuntimeHookItemConfig) Clone() RuntimeHookItemConfig {
 	if c.Enabled != nil {
 		cloned.Enabled = boolPtr(*c.Enabled)
 	}
+	if len(c.Match) > 0 {
+		cloned.Match = make(map[string]any, len(c.Match))
+		for key, value := range c.Match {
+			cloned.Match[key] = cloneRuntimeHookParamValue(value)
+		}
+	}
 	if len(c.Params) > 0 {
 		cloned.Params = make(map[string]any, len(c.Params))
 		for key, value := range c.Params {
@@ -279,8 +286,15 @@ func (c RuntimeHookItemConfig) Validate(defaultFailurePolicy string) error {
 		default:
 			return fmt.Errorf("handler %q is not supported", c.Handler)
 		}
-		if handler == runtimeHookHandlerWarnOnToolCall && !hasWarnOnToolCallTargets(c.Params) {
-			return fmt.Errorf("handler %q requires params.tool_name or params.tool_names", c.Handler)
+		hasExplicitMatcher := hooks.HasHookMatcherConfig(c.Match)
+		if handler == runtimeHookHandlerWarnOnToolCall && !hasExplicitMatcher && !hasWarnOnToolCallTargets(c.Params) {
+			return fmt.Errorf("handler %q requires match or params.tool_name/tool_names", c.Handler)
+		}
+		matcherRaw := resolveRuntimeHookMatcherConfigForValidation(c, handler)
+		if matcherRaw != nil {
+			if err := hooks.ValidateHookMatcher(point, matcherRaw); err != nil {
+				return fmt.Errorf("match: %w", err)
+			}
 		}
 	case runtimeHookKindCommand:
 		if normalizedMode != runtimeHookModeSync {
@@ -289,12 +303,22 @@ func (c RuntimeHookItemConfig) Validate(defaultFailurePolicy string) error {
 		if err := hooks.ValidateCommandParams(c.Params); err != nil {
 			return err
 		}
+		if hooks.HasHookMatcherConfig(c.Match) {
+			if err := hooks.ValidateHookMatcher(point, c.Match); err != nil {
+				return fmt.Errorf("match: %w", err)
+			}
+		}
 	case runtimeHookKindHTTP:
 		if normalizedMode != runtimeHookModeObserve {
 			return fmt.Errorf("mode %q is not supported for kind http (only observe)", c.Mode)
 		}
 		if err := validateRuntimeHTTPObserveItem(c, policy); err != nil {
 			return err
+		}
+		if hooks.HasHookMatcherConfig(c.Match) {
+			if err := hooks.ValidateHookMatcher(point, c.Match); err != nil {
+				return fmt.Errorf("match: %w", err)
+			}
 		}
 	}
 	return nil
@@ -427,6 +451,52 @@ func hasWarnOnToolCallTargets(params map[string]any) bool {
 	return false
 }
 
+// resolveRuntimeHookMatcherConfigForValidation 返回配置校验阶段的 matcher 配置。
+// 对 warn_on_tool_call 保持旧参数兼容：当未配置 match 时自动桥接 tool_name/tool_names。
+func resolveRuntimeHookMatcherConfigForValidation(item RuntimeHookItemConfig, handler string) map[string]any {
+	if hooks.HasHookMatcherConfig(item.Match) {
+		return item.Match
+	}
+	if strings.EqualFold(strings.TrimSpace(handler), runtimeHookHandlerWarnOnToolCall) && hasWarnOnToolCallTargets(item.Params) {
+		return runtimeHookLegacyWarnMatcherConfig(item.Params)
+	}
+	return nil
+}
+
+// runtimeHookLegacyWarnMatcherConfig 将 warn_on_tool_call 旧参数桥接为 matcher 配置。
+func runtimeHookLegacyWarnMatcherConfig(params map[string]any) map[string]any {
+	if len(params) == 0 {
+		return nil
+	}
+	var toolNames []string
+	if name := strings.TrimSpace(readRuntimeHookParamString(params, "tool_name")); name != "" {
+		toolNames = append(toolNames, name)
+	}
+	if raw, ok := params["tool_names"]; ok && raw != nil {
+		switch typed := raw.(type) {
+		case []string:
+			toolNames = append(toolNames, typed...)
+		case []any:
+			for _, value := range typed {
+				toolNames = append(toolNames, strings.TrimSpace(fmt.Sprintf("%v", value)))
+			}
+		}
+	}
+	filtered := make([]string, 0, len(toolNames))
+	for _, value := range toolNames {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return map[string]any{
+		"tool_name": filtered,
+	}
+}
+
 // readRuntimeHookParamString 以兼容方式读取 runtime hook 参数中的字符串值。
 func readRuntimeHookParamString(params map[string]any, key string) string {
 	if len(params) == 0 {
@@ -443,4 +513,3 @@ func readRuntimeHookParamString(params map[string]any, key string) string {
 		return fmt.Sprintf("%v", typed)
 	}
 }
-
