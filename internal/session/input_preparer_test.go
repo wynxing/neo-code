@@ -470,6 +470,92 @@ func TestInputPreparerPrepareImagePathAndMimeValidation(t *testing.T) {
 			t.Fatalf("expected mismatch error, got %v", err)
 		}
 	})
+
+	t.Run("declared mime params are normalized", func(t *testing.T) {
+		imagePath := filepath.Join(workdir, "declared-params.png")
+		if err := os.WriteFile(imagePath, minimalPNGBytes(), 0o644); err != nil {
+			t.Fatalf("write image: %v", err)
+		}
+
+		result, err := preparer.Prepare(context.Background(), PrepareInput{
+			Text:           "declared params",
+			Images:         []PrepareImageInput{{Path: imagePath, MimeType: " IMAGE/PNG; charset=binary "}},
+			DefaultWorkdir: workdir,
+		})
+		if err != nil {
+			t.Fatalf("Prepare() error = %v", err)
+		}
+		if len(result.SavedAssets) != 1 || result.SavedAssets[0].MimeType != "image/png" {
+			t.Fatalf("unexpected saved assets: %+v", result.SavedAssets)
+		}
+	})
+
+	t.Run("declared non image mime is rejected", func(t *testing.T) {
+		imagePath := filepath.Join(workdir, "declared-text.png")
+		if err := os.WriteFile(imagePath, minimalPNGBytes(), 0o644); err != nil {
+			t.Fatalf("write image: %v", err)
+		}
+
+		_, err := preparer.Prepare(context.Background(), PrepareInput{
+			Text:           "declared text",
+			Images:         []PrepareImageInput{{Path: imagePath, MimeType: "text/plain"}},
+			DefaultWorkdir: workdir,
+		})
+		if err == nil {
+			t.Fatalf("expected non-image mime error")
+		}
+		if !strings.Contains(err.Error(), "is not an image") {
+			t.Fatalf("expected non-image mime error, got %v", err)
+		}
+	})
+
+	t.Run("extension mismatch is rejected when mime omitted", func(t *testing.T) {
+		imagePath := filepath.Join(workdir, "wrong.jpg")
+		if err := os.WriteFile(imagePath, minimalPNGBytes(), 0o644); err != nil {
+			t.Fatalf("write image: %v", err)
+		}
+
+		_, err := preparer.Prepare(context.Background(), PrepareInput{
+			Text:           "extension mismatch",
+			Images:         []PrepareImageInput{{Path: imagePath}},
+			DefaultWorkdir: workdir,
+		})
+		if err == nil {
+			t.Fatalf("expected extension mismatch error")
+		}
+		if !strings.Contains(err.Error(), "file extension mime") {
+			t.Fatalf("expected extension mismatch error, got %v", err)
+		}
+	})
+}
+
+func TestInputPreparerPrepareSavedAssetReferenceValidation(t *testing.T) {
+	t.Parallel()
+
+	workdir := t.TempDir()
+	store := newInputPreparerTestStore(t, workdir)
+	session := NewWithWorkdir("existing", workdir)
+	if err := createSessionForPreparerTest(context.Background(), store, session); err != nil {
+		t.Fatalf("createSessionForPreparerTest() error = %v", err)
+	}
+	meta, err := store.SaveAsset(context.Background(), session.ID, bytes.NewReader(minimalPNGBytes()), "image/png")
+	if err != nil {
+		t.Fatalf("SaveAsset() error = %v", err)
+	}
+
+	preparer := NewInputPreparer(store, store)
+	_, err = preparer.Prepare(context.Background(), PrepareInput{
+		SessionID:      session.ID,
+		Text:           "bad declared mime",
+		Images:         []PrepareImageInput{{AssetID: meta.ID, MimeType: "image/jpeg"}},
+		DefaultWorkdir: workdir,
+	})
+	if err == nil {
+		t.Fatalf("expected referenced asset mime mismatch")
+	}
+	if !strings.Contains(err.Error(), "mismatches saved asset") {
+		t.Fatalf("expected saved asset mismatch error, got %v", err)
+	}
 }
 
 func TestAssetSaveErrorMethods(t *testing.T) {

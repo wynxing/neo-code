@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1584,6 +1586,109 @@ func TestConvertGatewayRunInputAndSessionHelpers(t *testing.T) {
 
 	if messages := convertSessionMessages(nil); messages != nil {
 		t.Fatalf("convert nil messages = %#v, want nil", messages)
+	}
+}
+
+func TestGatewayRuntimePortBridgeSessionAssets(t *testing.T) {
+	t.Parallel()
+
+	workdir := t.TempDir()
+	store := agentsession.NewSQLiteStore(t.TempDir(), workdir)
+	session := agentsession.NewWithWorkdir("asset session", workdir)
+	if _, err := store.CreateSession(context.Background(), agentsession.CreateSessionInput{
+		ID:        session.ID,
+		Title:     session.Title,
+		CreatedAt: session.CreatedAt,
+		UpdatedAt: session.UpdatedAt,
+		Head:      session.HeadSnapshot(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	bridge, err := newGatewayRuntimePortBridge(
+		context.Background(),
+		&runtimeStub{eventsCh: make(chan agentruntime.RuntimeEvent, 1)},
+		store,
+	)
+	if err != nil {
+		t.Fatalf("new bridge: %v", err)
+	}
+	defer bridge.Close()
+
+	payload := []byte("image payload")
+	meta, err := bridge.SaveSessionAsset(context.Background(), gateway.SaveSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: " " + session.ID + " ",
+		Reader:    bytes.NewReader(payload),
+		MimeType:  " image/png ",
+	})
+	if err != nil {
+		t.Fatalf("SaveSessionAsset() error = %v", err)
+	}
+	if meta.SessionID != session.ID || meta.AssetID == "" || meta.MimeType != "image/png" || meta.Size != int64(len(payload)) {
+		t.Fatalf("unexpected saved meta: %+v", meta)
+	}
+
+	opened, err := bridge.OpenSessionAsset(context.Background(), gateway.OpenSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: session.ID,
+		AssetID:   " " + meta.AssetID + " ",
+	})
+	if err != nil {
+		t.Fatalf("OpenSessionAsset() error = %v", err)
+	}
+	defer opened.Reader.Close()
+	got, err := io.ReadAll(opened.Reader)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if string(got) != string(payload) || opened.Meta.AssetID != meta.AssetID || opened.Meta.MimeType != "image/png" {
+		t.Fatalf("unexpected opened asset meta=%+v payload=%q", opened.Meta, string(got))
+	}
+}
+
+func TestGatewayRuntimePortBridgeSessionAssetErrors(t *testing.T) {
+	t.Parallel()
+
+	bridge, err := newGatewayRuntimePortBridge(
+		context.Background(),
+		&runtimeStub{eventsCh: make(chan agentruntime.RuntimeEvent, 1)},
+		testSessionStore,
+	)
+	if err != nil {
+		t.Fatalf("new bridge: %v", err)
+	}
+	defer bridge.Close()
+
+	if _, err := bridge.SaveSessionAsset(context.Background(), gateway.SaveSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: "  ",
+		Reader:    strings.NewReader("x"),
+		MimeType:  "image/png",
+	}); err == nil {
+		t.Fatal("expected empty session id save error")
+	}
+	if _, err := bridge.OpenSessionAsset(context.Background(), gateway.OpenSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: "session-1",
+		AssetID:   "  ",
+	}); err == nil {
+		t.Fatal("expected empty asset id open error")
+	}
+	if _, err := bridge.SaveSessionAsset(context.Background(), gateway.SaveSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: "session-1",
+		Reader:    strings.NewReader("x"),
+		MimeType:  "image/png",
+	}); err == nil || !strings.Contains(err.Error(), "asset store is unavailable") {
+		t.Fatalf("expected unavailable asset store save error, got %v", err)
+	}
+	if _, err := bridge.OpenSessionAsset(context.Background(), gateway.OpenSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: "session-1",
+		AssetID:   "asset-1",
+	}); err == nil || !strings.Contains(err.Error(), "asset store is unavailable") {
+		t.Fatalf("expected unavailable asset store open error, got %v", err)
 	}
 }
 
