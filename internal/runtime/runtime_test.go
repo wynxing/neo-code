@@ -782,7 +782,6 @@ type stubTool struct {
 	content   string
 	isError   bool
 	err       error
-	policy    tools.MicroCompactPolicy
 	callCount int
 	lastInput tools.ToolCallInput
 	executeFn func(ctx context.Context, input tools.ToolCallInput) (tools.ToolResult, error)
@@ -800,9 +799,6 @@ func (t *stubTool) Schema() map[string]any {
 	return map[string]any{"type": "object"}
 }
 
-func (t *stubTool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return t.policy
-}
 
 func (t *stubTool) Execute(ctx context.Context, input tools.ToolCallInput) (tools.ToolResult, error) {
 	t.callCount++
@@ -850,7 +846,6 @@ type stubToolManager struct {
 	result       tools.ToolResult
 	err          error
 	listErr      error
-	policies     map[string]tools.MicroCompactPolicy
 	listCalls    int
 	executeCalls int
 	lastInput    tools.ToolCallInput
@@ -876,18 +871,7 @@ func (m *stubToolManager) ListAvailableSpecs(ctx context.Context, input tools.Sp
 	return append([]providertypes.ToolSpec(nil), m.specs...), nil
 }
 
-func (m *stubToolManager) MicroCompactPolicy(name string) tools.MicroCompactPolicy {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if policy, ok := m.policies[name]; ok {
-		return policy
-	}
-	return tools.MicroCompactPolicyCompact
-}
 
-func (m *stubToolManager) MicroCompactSummarizer(name string) tools.ContentSummarizer {
-	return nil
-}
 
 func (m *stubToolManager) Execute(ctx context.Context, input tools.ToolCallInput) (tools.ToolResult, error) {
 	m.mu.Lock()
@@ -1622,9 +1606,6 @@ func TestServiceRunDelegatesToContextBuilder(t *testing.T) {
 	if builder.lastInput.Metadata.Model == "" {
 		t.Fatalf("expected model to be forwarded to builder metadata")
 	}
-	if builder.lastInput.Compact.DisableMicroCompact {
-		t.Fatalf("expected micro compact to stay enabled by default")
-	}
 	if builder.lastInput.TaskState.Goal != "Finish task state rollout" {
 		t.Fatalf("expected session task state to be forwarded to builder, got %+v", builder.lastInput.TaskState)
 	}
@@ -1716,46 +1697,6 @@ func TestServiceRunUsesSessionSelectionForMetadataAndBudget(t *testing.T) {
 	}
 }
 
-func TestServiceRunCanDisableMicroCompactViaConfig(t *testing.T) {
-	t.Parallel()
-
-	manager := newRuntimeConfigManager(t)
-	if err := manager.Update(context.Background(), func(cfg *config.Config) error {
-		cfg.Context.Compact.MicroCompactDisabled = true
-		return nil
-	}); err != nil {
-		t.Fatalf("update config: %v", err)
-	}
-
-	store := newMemoryStore()
-	registry := tools.NewRegistry()
-	registry.Register(&stubTool{name: "filesystem_read_file", content: "default"})
-
-	builder := &stubContextBuilder{
-		buildFn: func(ctx context.Context, input agentcontext.BuildInput) (agentcontext.BuildResult, error) {
-			return agentcontext.BuildResult{
-				SystemPrompt: "delegated prompt",
-				Messages:     append([]providertypes.Message(nil), input.Messages...),
-			}, nil
-		},
-	}
-
-	scripted := &scriptedProvider{
-		responses: []scriptedResponse{{
-			Message:      providertypes.Message{Role: providertypes.RoleAssistant, Parts: []providertypes.ContentPart{providertypes.NewTextPart("done")}},
-			FinishReason: "stop",
-		}},
-	}
-
-	service := NewWithFactory(manager, registry, store, &scriptedProviderFactory{provider: scripted}, builder)
-	if err := service.Run(context.Background(), UserInput{RunID: "run-disable-micro-compact", Parts: []providertypes.ContentPart{providertypes.NewTextPart("hello")}}); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if !builder.lastInput.Compact.DisableMicroCompact {
-		t.Fatalf("expected config to disable micro compact in build input")
-	}
-}
 
 func TestServiceRunPersistsSessionProviderAndModel(t *testing.T) {
 	t.Parallel()
@@ -1786,130 +1727,7 @@ func TestServiceRunPersistsSessionProviderAndModel(t *testing.T) {
 	}
 }
 
-func TestServiceRunDefaultBuilderUsesToolManagerMicroCompactPolicies(t *testing.T) {
-	t.Parallel()
 
-	manager := newRuntimeConfigManager(t)
-	store := newMemoryStore()
-	registry := tools.NewRegistry()
-	registry.Register(&stubTool{name: "preserve_tool", content: "default", policy: tools.MicroCompactPolicyPreserveHistory})
-	registry.Register(&stubTool{name: "bash", content: "default"})
-	registry.Register(&stubTool{name: "webfetch", content: "default"})
-
-	session := agentsession.New("preserve history")
-	session.ID = "session-preserve-history"
-	session.Messages = []providertypes.Message{
-		{Role: providertypes.RoleUser, Parts: []providertypes.ContentPart{providertypes.NewTextPart("older user")}},
-		{
-			Role: providertypes.RoleAssistant,
-			ToolCalls: []providertypes.ToolCall{
-				{ID: "call-1", Name: "preserve_tool", Arguments: "{}"},
-			},
-		},
-		{Role: providertypes.RoleTool, ToolCallID: "call-1", Parts: []providertypes.ContentPart{providertypes.NewTextPart("preserved result")}},
-		{
-			Role: providertypes.RoleAssistant,
-			ToolCalls: []providertypes.ToolCall{
-				{ID: "call-2", Name: "bash", Arguments: "{}"},
-			},
-		},
-		{Role: providertypes.RoleTool, ToolCallID: "call-2", Parts: []providertypes.ContentPart{providertypes.NewTextPart("recent bash result")}},
-		{
-			Role: providertypes.RoleAssistant,
-			ToolCalls: []providertypes.ToolCall{
-				{ID: "call-3", Name: "webfetch", Arguments: "{}"},
-			},
-		},
-		{Role: providertypes.RoleTool, ToolCallID: "call-3", Parts: []providertypes.ContentPart{providertypes.NewTextPart("latest webfetch result")}},
-	}
-	store.sessions[session.ID] = cloneSession(session)
-
-	scripted := &scriptedProvider{
-		responses: []scriptedResponse{{
-			Message:      providertypes.Message{Role: providertypes.RoleAssistant, Parts: []providertypes.ContentPart{providertypes.NewTextPart("done")}},
-			FinishReason: "stop",
-		}},
-	}
-
-	service := NewWithFactory(manager, registry, store, &scriptedProviderFactory{provider: scripted}, nil)
-	if err := service.Run(context.Background(), UserInput{
-		SessionID: session.ID,
-		RunID:     "run-preserve-history-policy",
-		Parts:     []providertypes.ContentPart{providertypes.NewTextPart("latest explicit instruction")},
-	}); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if len(scripted.requests) != 1 {
-		t.Fatalf("expected 1 provider request, got %d", len(scripted.requests))
-	}
-	if got := renderPartsForTest(scripted.requests[0].Messages[2].Parts); got != "preserved result" {
-		t.Fatalf("expected preserved tool result to remain visible, got %q", got)
-	}
-}
-
-func TestServiceRunDefaultBuilderUsesGenericToolManagerMicroCompactPolicies(t *testing.T) {
-	t.Parallel()
-
-	manager := newRuntimeConfigManager(t)
-	store := newMemoryStore()
-	toolManager := &stubToolManager{
-		policies: map[string]tools.MicroCompactPolicy{
-			"preserve_tool": tools.MicroCompactPolicyPreserveHistory,
-		},
-	}
-
-	session := agentsession.New("preserve history by manager")
-	session.ID = "session-preserve-history-manager"
-	session.Messages = []providertypes.Message{
-		{Role: providertypes.RoleUser, Parts: []providertypes.ContentPart{providertypes.NewTextPart("older user")}},
-		{
-			Role: providertypes.RoleAssistant,
-			ToolCalls: []providertypes.ToolCall{
-				{ID: "call-1", Name: "preserve_tool", Arguments: "{}"},
-			},
-		},
-		{Role: providertypes.RoleTool, ToolCallID: "call-1", Parts: []providertypes.ContentPart{providertypes.NewTextPart("preserved result")}},
-		{
-			Role: providertypes.RoleAssistant,
-			ToolCalls: []providertypes.ToolCall{
-				{ID: "call-2", Name: "bash", Arguments: "{}"},
-			},
-		},
-		{Role: providertypes.RoleTool, ToolCallID: "call-2", Parts: []providertypes.ContentPart{providertypes.NewTextPart("recent bash result")}},
-		{
-			Role: providertypes.RoleAssistant,
-			ToolCalls: []providertypes.ToolCall{
-				{ID: "call-3", Name: "webfetch", Arguments: "{}"},
-			},
-		},
-		{Role: providertypes.RoleTool, ToolCallID: "call-3", Parts: []providertypes.ContentPart{providertypes.NewTextPart("latest webfetch result")}},
-	}
-	store.sessions[session.ID] = cloneSession(session)
-
-	scripted := &scriptedProvider{
-		responses: []scriptedResponse{{
-			Message:      providertypes.Message{Role: providertypes.RoleAssistant, Parts: []providertypes.ContentPart{providertypes.NewTextPart("done")}},
-			FinishReason: "stop",
-		}},
-	}
-
-	service := NewWithFactory(manager, toolManager, store, &scriptedProviderFactory{provider: scripted}, &stubContextBuilder{})
-	if err := service.Run(context.Background(), UserInput{
-		SessionID: session.ID,
-		RunID:     "run-preserve-history-generic-manager",
-		Parts:     []providertypes.ContentPart{providertypes.NewTextPart("latest explicit instruction")},
-	}); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if len(scripted.requests) != 1 {
-		t.Fatalf("expected 1 provider request, got %d", len(scripted.requests))
-	}
-	if got := renderPartsForTest(scripted.requests[0].Messages[2].Parts); got != "preserved result" {
-		t.Fatalf("expected preserved tool result to remain visible, got %q", got)
-	}
-}
 
 func TestServiceRunFailurePreservesExistingSessionProviderAndModel(t *testing.T) {
 	t.Parallel()

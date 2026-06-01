@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"neo-code/internal/tools"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,7 +11,6 @@ import (
 	"regexp"
 	"strings"
 
-	"neo-code/internal/tools"
 )
 
 const defaultGrepResultLimit = 200
@@ -58,11 +58,6 @@ func (t *GrepTool) Schema() map[string]any {
 		},
 		"required": []string{"pattern"},
 	}
-}
-
-// MicroCompactPolicy 声明 grep 工具的历史结果默认参与 micro compact 清理。
-func (t *GrepTool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyCompact
 }
 
 func (t *GrepTool) Execute(ctx context.Context, input tools.ToolCallInput) (tools.ToolResult, error) {

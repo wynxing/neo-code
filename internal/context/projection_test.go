@@ -26,12 +26,6 @@ func TestProjectToolMessagesForModelSkipsMessagesThatCannotBeProjected(t *testin
 		},
 		{
 			Role:         providertypes.RoleTool,
-			ToolCallID:   "call-3",
-			Parts:        []providertypes.ContentPart{providertypes.NewTextPart(microCompactClearedMessage)},
-			ToolMetadata: map[string]string{"tool_name": "bash"},
-		},
-		{
-			Role:         providertypes.RoleTool,
 			ToolCallID:   "call-4",
 			Parts:        []providertypes.ContentPart{providertypes.NewTextPart("result")},
 			ToolMetadata: map[string]string{"tool_name": "filesystem_read_file", "path": "README.md"},
@@ -48,10 +42,7 @@ func TestProjectToolMessagesForModelSkipsMessagesThatCannotBeProjected(t *testin
 	if !strings.Contains(renderDisplayParts(projected[2].Parts), "tool result") || projected[2].ToolMetadata != nil {
 		t.Fatalf("metadata-only tool message should be projected, got %+v", projected[2])
 	}
-	if renderDisplayParts(projected[3].Parts) != microCompactClearedMessage || projected[3].ToolMetadata == nil {
-		t.Fatalf("cleared tool content should not be projected, got %+v", projected[3])
-	}
-	if !strings.Contains(renderDisplayParts(projected[4].Parts), "tool result") || projected[4].ToolMetadata != nil {
+	if !strings.Contains(renderDisplayParts(projected[3].Parts), "tool result") || projected[3].ToolMetadata != nil {
 		t.Fatalf("valid tool message should be projected, got %+v", projected[4])
 	}
 }
@@ -369,11 +360,6 @@ func TestIsInjectableToolMessage(t *testing.T) {
 			name:    "metadata-only",
 			message: providertypes.Message{Role: providertypes.RoleTool, Parts: []providertypes.ContentPart{providertypes.NewTextPart("   ")}, ToolMetadata: map[string]string{"tool_name": "bash"}},
 			want:    true,
-		},
-		{
-			name:    "cleared",
-			message: providertypes.Message{Role: providertypes.RoleTool, Parts: []providertypes.ContentPart{providertypes.NewTextPart(microCompactClearedMessage)}},
-			want:    false,
 		},
 		{
 			name:    "valid",

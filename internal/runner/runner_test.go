@@ -30,14 +30,6 @@ func (m *runnerManagerAdapter) ListAvailableSpecs(context.Context, tools.SpecLis
 	return nil, nil
 }
 
-func (m *runnerManagerAdapter) MicroCompactPolicy(string) tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyCompact
-}
-
-func (m *runnerManagerAdapter) MicroCompactSummarizer(string) tools.ContentSummarizer {
-	return nil
-}
-
 func (m *runnerManagerAdapter) Execute(ctx context.Context, input tools.ToolCallInput) (tools.ToolResult, error) {
 	if m.executeFn != nil {
 		return m.executeFn(ctx, input)

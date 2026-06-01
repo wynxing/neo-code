@@ -11,7 +11,6 @@
 | **传输层全 HTTP 化** | 当前 `transport/` 中残留的 Unix socket / Named pipe 逻辑增加了双平台代码路径和维护负担。统一到 HTTP JSON-RPC 后：第三方客户端接入更简单（只需要发 HTTP POST，不需要理解 Unix socket 地址规则）、Windows 和 Linux/macOS 的客户端连接逻辑完全一致 | 高——正在进行 |
 | **Gateway 大文件拆分** | `bootstrap.go` 超 1600 行，包含帧路由、认证、session CRUD、RPC 处理、流绑定等所有 Gateway 逻辑。5 人团队每人负责不同模块，但 Gateway 的改动集中在同一大文件中 → 持续的合并冲突。按功能域拆分为 `auth_handler.go`、`session_handler.go`、`stream_handler.go` 后，各自改自己的文件 | 高——直接影响并行开发效率 |
 | **Runner 工具并行执行** | Runner 当前串行处理 Gateway 下发的工具请求。在"手机飞书下指令 → 工位 Runner 执行"场景中，模型经常一次产出多个独立的 tool call（如同时读 3 个文件），串行执行导致不必要的延迟。改为并行执行可显著改善远程场景的响应体验 | 中——核心差异化场景的性能瓶颈 |
-| **Compact 配置收敛** | MicroCompact 的 `MicroCompactConfig`、Full Compact 的 `CompactConfig`、预算阈值在 `RuntimeConfig` 中分散定义。调整上下文压缩策略时需要理解三个不同的配置入口，容易产生不一致的配置。收敛为单一 `CompactPolicy` 结构体 | 中——降低调优门槛 |
 
 ### 17.2 中期（巩固和放大现有差异化优势）
 

@@ -20,9 +20,6 @@ func TestToolMetadata(t *testing.T) {
 	if tool.Schema() == nil {
 		t.Fatal("Schema() should not be nil")
 	}
-	if tool.MicroCompactPolicy() != tools.MicroCompactPolicyPreserveHistory {
-		t.Fatalf("MicroCompactPolicy() = %q, want %q", tool.MicroCompactPolicy(), tools.MicroCompactPolicyPreserveHistory)
-	}
 }
 
 func TestToolExecuteFallbackWhenInvokerUnavailable(t *testing.T) {

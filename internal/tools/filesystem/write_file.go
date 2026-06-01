@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"neo-code/internal/tools"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,7 +11,6 @@ import (
 	"unicode/utf8"
 
 	"neo-code/internal/security"
-	"neo-code/internal/tools"
 )
 
 type WriteFileTool struct {
@@ -59,11 +59,6 @@ func (t *WriteFileTool) Schema() map[string]any {
 		},
 		"required": []string{"path", "content"},
 	}
-}
-
-// MicroCompactPolicy 声明写文件工具的历史结果默认参与 micro compact 清理。
-func (t *WriteFileTool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyCompact
 }
 
 func (t *WriteFileTool) Execute(ctx context.Context, input tools.ToolCallInput) (tools.ToolResult, error) {

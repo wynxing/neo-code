@@ -61,10 +61,8 @@ context:
   compact:
     manual_strategy: keep_recent
     manual_keep_recent_messages: 10
-    micro_compact_retained_tool_spans: 6
     read_time_max_message_spans: 24
     max_summary_chars: 1200
-    micro_compact_disabled: false
   budget:
     prompt_budget: 0
     reserve_tokens: 13000
@@ -89,10 +87,8 @@ context:
 |------|------|
 | `context.compact.manual_strategy` | `/compact` 手动压缩策略，支持 `keep_recent` / `full_replace` |
 | `context.compact.manual_keep_recent_messages` | `keep_recent` 下保留的最近消息数 |
-| `context.compact.micro_compact_retained_tool_spans` | read-time micro compact 默认保留原始内容的最近工具块数量 |
 | `context.compact.read_time_max_message_spans` | context 构建时保留的 message span 上限 |
 | `context.compact.max_summary_chars` | compact summary 最大字符数 |
-| `context.compact.micro_compact_disabled` | 是否关闭默认启用的 micro compact |
 
 ### `context.budget`
 

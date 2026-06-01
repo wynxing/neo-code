@@ -1,13 +1,13 @@
 package memo
 
 import (
+	"neo-code/internal/tools"
 	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	"neo-code/internal/memo"
-	"neo-code/internal/tools"
 )
 
 const (
@@ -67,11 +67,6 @@ func (t *RememberTool) Schema() map[string]any {
 		},
 		"required": []string{"type", "title", "content"},
 	}
-}
-
-// MicroCompactPolicy 记忆写入结果应保留在上下文中，不参与 micro compact 清理。
-func (t *RememberTool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyPreserveHistory
 }
 
 // Execute 执行 memo_remember 工具调用。调用前须确保 svc 已通过构造函数注入。

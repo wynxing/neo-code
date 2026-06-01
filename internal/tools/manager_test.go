@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	providertypes "neo-code/internal/provider/types"
 	"neo-code/internal/security"
 	"neo-code/internal/tools/mcp"
 )
@@ -20,7 +19,6 @@ type managerStubTool struct {
 	name      string
 	content   string
 	err       error
-	policy    MicroCompactPolicy
 	callCount int
 	lastCall  ToolCallInput
 }
@@ -31,7 +29,6 @@ func (t *managerStubTool) Description() string { return "stub tool" }
 
 func (t *managerStubTool) Schema() map[string]any { return map[string]any{"type": "object"} }
 
-func (t *managerStubTool) MicroCompactPolicy() MicroCompactPolicy { return t.policy }
 
 func (t *managerStubTool) Execute(ctx context.Context, call ToolCallInput) (ToolResult, error) {
 	t.callCount++
@@ -49,20 +46,9 @@ type stubSandbox struct {
 	lastAction security.Action
 }
 
-type executorWithoutOptionalCompactFeatures struct{}
 
-func (executorWithoutOptionalCompactFeatures) ListAvailableSpecs(ctx context.Context, input SpecListInput) ([]providertypes.ToolSpec, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return nil, nil
-}
 
-func (executorWithoutOptionalCompactFeatures) Execute(ctx context.Context, call ToolCallInput) (ToolResult, error) {
-	return ToolResult{}, ctx.Err()
-}
 
-func (executorWithoutOptionalCompactFeatures) Supports(name string) bool { return false }
 
 func (s *stubSandbox) Check(ctx context.Context, action security.Action) (*security.WorkspaceExecutionPlan, error) {
 	s.callCount++
@@ -135,92 +121,7 @@ func TestDefaultManagerListAvailableSpecsReadOnlyFiltersWriteTools(t *testing.T)
 	}
 }
 
-func TestDefaultManagerMicroCompactPolicy(t *testing.T) {
-	t.Parallel()
 
-	t.Run("nil manager defaults to compact", func(t *testing.T) {
-		t.Parallel()
-
-		var manager *DefaultManager
-		if got := manager.MicroCompactPolicy("custom_tool"); got != MicroCompactPolicyCompact {
-			t.Fatalf("expected compact default, got %q", got)
-		}
-	})
-
-	t.Run("executor without policy support defaults to compact", func(t *testing.T) {
-		t.Parallel()
-
-		manager, err := NewManager(executorWithoutOptionalCompactFeatures{}, mustAllowEngine(t), nil)
-		if err != nil {
-			t.Fatalf("new manager: %v", err)
-		}
-		if got := manager.MicroCompactPolicy("custom_tool"); got != MicroCompactPolicyCompact {
-			t.Fatalf("expected compact default, got %q", got)
-		}
-	})
-
-	t.Run("executor policy is forwarded", func(t *testing.T) {
-		t.Parallel()
-
-		registry := NewRegistry()
-		registry.Register(&managerStubTool{name: "preserve_tool", policy: MicroCompactPolicyPreserveHistory})
-
-		manager, err := NewManager(registry, mustAllowEngine(t), nil)
-		if err != nil {
-			t.Fatalf("new manager: %v", err)
-		}
-		if got := manager.MicroCompactPolicy("preserve_tool"); got != MicroCompactPolicyPreserveHistory {
-			t.Fatalf("expected preserve history, got %q", got)
-		}
-	})
-}
-
-func TestDefaultManagerMicroCompactSummarizer(t *testing.T) {
-	t.Parallel()
-
-	t.Run("nil manager returns nil", func(t *testing.T) {
-		t.Parallel()
-
-		var manager *DefaultManager
-		if got := manager.MicroCompactSummarizer("custom_tool"); got != nil {
-			t.Fatalf("expected nil summarizer, got non-nil")
-		}
-	})
-
-	t.Run("executor without summarizer support returns nil", func(t *testing.T) {
-		t.Parallel()
-
-		manager, err := NewManager(executorWithoutOptionalCompactFeatures{}, mustAllowEngine(t), nil)
-		if err != nil {
-			t.Fatalf("new manager: %v", err)
-		}
-		if got := manager.MicroCompactSummarizer("custom_tool"); got != nil {
-			t.Fatalf("expected nil summarizer, got non-nil")
-		}
-	})
-
-	t.Run("executor summarizer is forwarded", func(t *testing.T) {
-		t.Parallel()
-
-		registry := NewRegistry()
-		registry.RegisterSummarizer("custom_tool", func(content string, metadata map[string]string, isError bool) string {
-			return "summary:" + content
-		})
-
-		manager, err := NewManager(registry, mustAllowEngine(t), nil)
-		if err != nil {
-			t.Fatalf("new manager: %v", err)
-		}
-
-		summarizer := manager.MicroCompactSummarizer("CUSTOM_TOOL")
-		if summarizer == nil {
-			t.Fatal("expected non-nil summarizer")
-		}
-		if got := summarizer("content", nil, false); got != "summary:content" {
-			t.Fatalf("unexpected summary output: %q", got)
-		}
-	})
-}
 
 func TestDefaultManagerListAvailableSpecsBoundaries(t *testing.T) {
 	t.Parallel()

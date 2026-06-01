@@ -1,6 +1,7 @@
 package diagnose
 
 import (
+	"neo-code/internal/tools"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"neo-code/internal/subagent"
-	"neo-code/internal/tools"
 )
 
 const (
@@ -81,11 +81,6 @@ func (t *Tool) Schema() map[string]any {
 		},
 		"required": []string{"error_log", "os_env"},
 	}
-}
-
-// MicroCompactPolicy 保留诊断结果，避免短期压缩时丢失排障上下文。
-func (t *Tool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyPreserveHistory
 }
 
 // Execute 校验输入并通过 SpawnSubAgent 能力链路执行真实诊断，失败时静默降级。

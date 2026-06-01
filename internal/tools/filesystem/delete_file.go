@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"neo-code/internal/tools"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,7 +9,6 @@ import (
 	"strings"
 
 	"neo-code/internal/security"
-	"neo-code/internal/tools"
 )
 
 type DeleteFileTool struct {
@@ -42,10 +42,6 @@ func (t *DeleteFileTool) Schema() map[string]any {
 		},
 		"required": []string{"path"},
 	}
-}
-
-func (t *DeleteFileTool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyCompact
 }
 
 func (t *DeleteFileTool) Execute(ctx context.Context, input tools.ToolCallInput) (tools.ToolResult, error) {

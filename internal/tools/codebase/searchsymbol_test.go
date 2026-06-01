@@ -32,9 +32,6 @@ func TestSearchSymbolToolMetadata(t *testing.T) {
 	if _, hasSymbol := props["symbol"]; !hasSymbol {
 		t.Fatalf("Schema should have symbol property")
 	}
-	if tool.MicroCompactPolicy() != tools.MicroCompactPolicyCompact {
-		t.Fatalf("MicroCompactPolicy() = %v, want Compact", tool.MicroCompactPolicy())
-	}
 }
 
 func TestSearchSymbolToolInvalidJSON(t *testing.T) {

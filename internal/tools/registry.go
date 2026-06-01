@@ -14,9 +14,6 @@ import (
 
 type Registry struct {
 	tools                   map[string]Tool
-	microCompactPolicies    map[string]MicroCompactPolicy
-	microCompactSummarizers map[string]ContentSummarizer
-	microCompactSummaryMu   sync.RWMutex
 	mcpMu                   sync.RWMutex
 	mcpRegistry             *mcp.Registry
 	mcpFactory              *mcp.AdapterFactory
@@ -26,9 +23,7 @@ type Registry struct {
 
 func NewRegistry() *Registry {
 	return &Registry{
-		tools:                   map[string]Tool{},
-		microCompactPolicies:    map[string]MicroCompactPolicy{},
-		microCompactSummarizers: map[string]ContentSummarizer{},
+		tools: map[string]Tool{},
 	}
 }
 
@@ -95,12 +90,6 @@ func (r *Registry) Register(tool Tool) {
 	}
 	name := strings.ToLower(tool.Name())
 	r.tools[name] = tool
-	switch tool.MicroCompactPolicy() {
-	case MicroCompactPolicyPreserveHistory:
-		r.microCompactPolicies[name] = MicroCompactPolicyPreserveHistory
-	default:
-		r.microCompactPolicies[name] = MicroCompactPolicyCompact
-	}
 }
 
 func (r *Registry) Get(name string) (Tool, error) {
@@ -119,48 +108,8 @@ func (r *Registry) Supports(name string) bool {
 	return r.supportsMCPTool(name)
 }
 
-// MicroCompactPolicy 返回指定工具的 micro compact 策略；未知工具按默认可压缩处理。
-func (r *Registry) MicroCompactPolicy(name string) MicroCompactPolicy {
-	if r == nil {
-		return MicroCompactPolicyCompact
-	}
-	policy, ok := r.microCompactPolicies[strings.ToLower(strings.TrimSpace(name))]
-	if !ok {
-		return MicroCompactPolicyCompact
-	}
-	if policy == MicroCompactPolicyPreserveHistory {
-		return MicroCompactPolicyPreserveHistory
-	}
-	return MicroCompactPolicyCompact
-}
 
-// RegisterSummarizer 为指定工具注册内容摘要器；传入 nil 移除已有条目。
-func (r *Registry) RegisterSummarizer(toolName string, summarizer ContentSummarizer) {
-	if r == nil {
-		return
-	}
-	name := strings.ToLower(strings.TrimSpace(toolName))
-	r.microCompactSummaryMu.Lock()
-	defer r.microCompactSummaryMu.Unlock()
-	if summarizer == nil {
-		delete(r.microCompactSummarizers, name)
-		return
-	}
-	r.microCompactSummarizers[name] = summarizer
-}
 
-// MicroCompactSummarizer 返回指定工具的内容摘要器；无注册时返回 nil。
-func (r *Registry) MicroCompactSummarizer(name string) ContentSummarizer {
-	if r == nil {
-		return nil
-	}
-	r.microCompactSummaryMu.RLock()
-	defer r.microCompactSummaryMu.RUnlock()
-	if r.microCompactSummarizers == nil {
-		return nil
-	}
-	return r.microCompactSummarizers[strings.ToLower(strings.TrimSpace(name))]
-}
 
 func (r *Registry) GetSpecs() []providertypes.ToolSpec {
 	names := make([]string, 0, len(r.tools))

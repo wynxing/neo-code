@@ -16,6 +16,32 @@ const (
 
 const truncatedExcerptMarker = "\n...[truncated]...\n"
 
+// cloneContextMessages 深拷贝消息切片，避免读时投影污染 runtime 持有的原始会话消息。
+func cloneContextMessages(messages []providertypes.Message) []providertypes.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	cloned := make([]providertypes.Message, 0, len(messages))
+	for _, message := range messages {
+		cloned = append(cloned, cloneSingleMessage(message))
+	}
+	return cloned
+}
+
+// cloneSingleMessage 深拷贝单条消息，隔离 ToolCalls 和 ToolMetadata 的底层引用。
+func cloneSingleMessage(msg providertypes.Message) providertypes.Message {
+	next := msg
+	next.ToolCalls = append([]providertypes.ToolCall(nil), msg.ToolCalls...)
+	if len(msg.ToolMetadata) > 0 {
+		next.ToolMetadata = make(map[string]string, len(msg.ToolMetadata))
+		for key, value := range msg.ToolMetadata {
+			next.ToolMetadata[key] = value
+		}
+	}
+	return next
+}
+
 // ProjectToolMessagesForModel 原地投影 tool 消息，复用主链路对模型可见的只读格式化规则。
 func ProjectToolMessagesForModel(messages []providertypes.Message) []providertypes.Message {
 	for i := range messages {
@@ -184,9 +210,6 @@ func isInjectableToolMessage(message providertypes.Message) bool {
 		return false
 	}
 	content := strings.TrimSpace(renderDisplayParts(message.Parts))
-	if content == microCompactClearedMessage {
-		return false
-	}
 	return content != "" || len(message.ToolMetadata) > 0
 }
 

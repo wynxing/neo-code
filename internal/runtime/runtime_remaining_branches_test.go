@@ -32,13 +32,7 @@ func (m *callbackToolManager) ListAvailableSpecs(ctx context.Context, input tool
 	return nil, ctx.Err()
 }
 
-func (m *callbackToolManager) MicroCompactPolicy(name string) tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyCompact
-}
 
-func (m *callbackToolManager) MicroCompactSummarizer(name string) tools.ContentSummarizer {
-	return nil
-}
 
 func (m *callbackToolManager) Execute(ctx context.Context, input tools.ToolCallInput) (tools.ToolResult, error) {
 	if m.executeFn != nil {

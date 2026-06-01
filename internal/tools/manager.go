@@ -27,8 +27,6 @@ type SpecListInput struct {
 // Manager is the runtime-facing tool execution and schema exposure boundary.
 type Manager interface {
 	ListAvailableSpecs(ctx context.Context, input SpecListInput) ([]providertypes.ToolSpec, error)
-	MicroCompactPolicy(name string) MicroCompactPolicy
-	MicroCompactSummarizer(name string) ContentSummarizer
 	// Execute 必须支持并发调用；runtime 可能在同一轮中并行调度多个工具调用。
 	Execute(ctx context.Context, input ToolCallInput) (ToolResult, error)
 	RememberSessionDecision(sessionID string, action security.Action, scope SessionPermissionScope) error
@@ -42,11 +40,9 @@ type Executor interface {
 }
 
 type microCompactPolicyExecutor interface {
-	MicroCompactPolicy(name string) MicroCompactPolicy
 }
 
 type microCompactSummarizerExecutor interface {
-	MicroCompactSummarizer(name string) ContentSummarizer
 }
 
 // factsEnrichingExecutor 包装底层执行器，在不信任外部 metadata 的前提下补齐受信结构化事实。
@@ -72,21 +68,7 @@ func (e *factsEnrichingExecutor) Supports(name string) bool {
 	return e.inner.Supports(name)
 }
 
-// MicroCompactPolicy 透传被包装执行器的压缩策略，确保 UI/Runtime 行为与原实现一致。
-func (e *factsEnrichingExecutor) MicroCompactPolicy(name string) MicroCompactPolicy {
-	if source, ok := e.inner.(microCompactPolicyExecutor); ok {
-		return source.MicroCompactPolicy(name)
-	}
-	return MicroCompactPolicyCompact
-}
 
-// MicroCompactSummarizer 透传被包装执行器的摘要器实现，避免包装层吞掉摘要能力。
-func (e *factsEnrichingExecutor) MicroCompactSummarizer(name string) ContentSummarizer {
-	if source, ok := e.inner.(microCompactSummarizerExecutor); ok {
-		return source.MicroCompactSummarizer(name)
-	}
-	return nil
-}
 
 // Execute 在执行后按本地权限动作补齐可信 facts，避免运行时依赖远端 metadata。
 func (e *factsEnrichingExecutor) Execute(ctx context.Context, input ToolCallInput) (ToolResult, error) {
@@ -324,27 +306,7 @@ func (m *DefaultManager) ListAvailableSpecs(ctx context.Context, input SpecListI
 	return readOnlyFiltered, nil
 }
 
-// MicroCompactPolicy 返回工具的 micro compact 策略；无法判断时按默认可压缩处理。
-func (m *DefaultManager) MicroCompactPolicy(name string) MicroCompactPolicy {
-	if m == nil || m.executor == nil {
-		return MicroCompactPolicyCompact
-	}
-	if source, ok := m.executor.(microCompactPolicyExecutor); ok {
-		return source.MicroCompactPolicy(name)
-	}
-	return MicroCompactPolicyCompact
-}
 
-// MicroCompactSummarizer 返回工具的内容摘要器；未注册时返回 nil。
-func (m *DefaultManager) MicroCompactSummarizer(name string) ContentSummarizer {
-	if m == nil || m.executor == nil {
-		return nil
-	}
-	if source, ok := m.executor.(microCompactSummarizerExecutor); ok {
-		return source.MicroCompactSummarizer(name)
-	}
-	return nil
-}
 
 // Execute runs the tool if the permission engine allows it and the sandbox
 // check passes.

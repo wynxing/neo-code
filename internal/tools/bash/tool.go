@@ -1,13 +1,13 @@
 package bash
 
 import (
+	"neo-code/internal/tools"
 	"context"
 	"encoding/json"
 	"errors"
 	"strings"
 	"time"
 
-	"neo-code/internal/tools"
 )
 
 type Tool struct {
@@ -78,11 +78,6 @@ func (t *Tool) Schema() map[string]any {
 		},
 		"required": []string{"command"},
 	}
-}
-
-// MicroCompactPolicy 声明 bash 工具的历史结果默认参与 micro compact 清理。
-func (t *Tool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyCompact
 }
 
 func (t *Tool) Execute(ctx context.Context, call tools.ToolCallInput) (tools.ToolResult, error) {

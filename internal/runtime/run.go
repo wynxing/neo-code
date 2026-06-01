@@ -571,8 +571,6 @@ func (s *Service) prepareTurnBudgetSnapshot(ctx context.Context, state *runState
 			SessionOutputTokens: state.session.TokenOutputTotal,
 		},
 		Compact: agentcontext.CompactOptions{
-			DisableMicroCompact:           cfg.Context.Compact.MicroCompactDisabled,
-			MicroCompactRetainedToolSpans: cfg.Context.Compact.MicroCompactRetainedToolSpans,
 			ReadTimeMaxMessageSpans:       cfg.Context.Compact.ReadTimeMaxMessageSpans,
 		},
 	})

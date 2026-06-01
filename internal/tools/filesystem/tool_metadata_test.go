@@ -3,7 +3,6 @@ package filesystem
 import (
 	"testing"
 
-	"neo-code/internal/tools"
 )
 
 func TestFilesystemToolMetadata(t *testing.T) {
@@ -14,15 +13,13 @@ func TestFilesystemToolMetadata(t *testing.T) {
 		toolName    string
 		description string
 		schema      map[string]any
-		policy      tools.MicroCompactPolicy
 	}{
 		{
 			name:        "delete file",
 			toolName:    NewDelete("/workspace").Name(),
 			description: NewDelete("/workspace").Description(),
 			schema:      NewDelete("/workspace").Schema(),
-			policy:      NewDelete("/workspace").MicroCompactPolicy(),
-		},
+			},
 	}
 
 	for _, tt := range tests {
@@ -41,9 +38,6 @@ func TestFilesystemToolMetadata(t *testing.T) {
 			required, ok := tt.schema["required"].([]string)
 			if !ok || len(required) == 0 {
 				t.Fatalf("required schema fields missing: %#v", tt.schema["required"])
-			}
-			if tt.policy != tools.MicroCompactPolicyCompact {
-				t.Fatalf("policy = %q, want compact", tt.policy)
 			}
 		})
 	}

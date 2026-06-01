@@ -1,13 +1,13 @@
 package memo
 
 import (
+	"neo-code/internal/tools"
 	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	"neo-code/internal/memo"
-	"neo-code/internal/tools"
 )
 
 const removeToolName = tools.ToolNameMemoRemove
@@ -48,11 +48,6 @@ func (t *RemoveTool) Schema() map[string]any {
 		},
 		"required": []string{"keyword"},
 	}
-}
-
-// MicroCompactPolicy 删除结果应保留在上下文中，不参与 micro compact 清理。
-func (t *RemoveTool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyPreserveHistory
 }
 
 // Execute 执行 memo_remove 工具调用。

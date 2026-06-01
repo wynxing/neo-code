@@ -179,14 +179,7 @@ func BuildGatewayServerDeps(ctx context.Context, opts BootstrapOptions) (Runtime
 		log.Printf("session cleanup warning: %v", err)
 	}
 
-	// 注册内置工具的内容摘要器，使 micro-compact 在清理旧工具结果时保留关键上下文。
-	tools.RegisterBuiltinSummarizers(toolRegistry)
-
-	microCompactCfg := agentcontext.MicroCompactConfig{
-		Policies:    toolRegistry,
-		Summarizers: toolRegistry,
-	}
-	var contextBuilder agentcontext.Builder = agentcontext.NewConfiguredBuilder(microCompactCfg)
+	var contextBuilder agentcontext.Builder = agentcontext.NewConfiguredBuilder()
 	var memoSvc *memo.Service
 	if cfg.Memo.Enabled {
 		memoStore := memo.NewFileStore(sharedDeps.ConfigManager.BaseDir(), cfg.Workdir)
@@ -195,7 +188,7 @@ func BuildGatewayServerDeps(ctx context.Context, opts BootstrapOptions) (Runtime
 		if invalidator, ok := memoSource.(interface{ InvalidateCache() }); ok {
 			sourceInvl = invalidator.InvalidateCache
 		}
-		contextBuilder = agentcontext.NewConfiguredBuilder(microCompactCfg, memoSource)
+		contextBuilder = agentcontext.NewConfiguredBuilder(memoSource)
 		memoSvc = memo.NewService(memoStore, cfg.Memo, sourceInvl)
 		toolRegistry.Register(memotool.NewRememberTool(memoSvc))
 		toolRegistry.Register(memotool.NewRecallTool(memoSvc))

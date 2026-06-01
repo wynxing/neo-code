@@ -524,7 +524,7 @@ graph LR
 | **模型适配器** | 归一化不同厂商的 Chat API 为统一的 `Generate()` + `EstimateInputTokens()` 接口；将厂商特定的流式响应格式转换为标准 `StreamEvent` | 厂商差异不泄漏到 Runtime；每个 Adapter 独立测试 | Provider |
 | **工具执行器** | 暴露工具的 Schema 供模型选择；校验参数并执行工具调用；在每次执行前经过安全守卫的权限裁决 | 所有模型可调用的能力收敛于此角色；不在 Runtime 或客户端中绕过 | Tools (Manager) |
 | **安全守卫** | 基于策略规则（Priority 排序）裁决每个操作的 allow/deny/ask 决策；校验工作区边界（路径穿越检测、Symlink 解析）；管理会话级权限记忆 | 位于工具执行的关键路径上，不可跳过 | Security Engine |
-| **上下文构建器** | 按会话状态 + 预算阈值动态组装 System Prompt 和消息列表；执行上下文压缩（MicroCompact / Full Compact / Trim） | 压缩时不丢失 System Prompt 和 Pin 标记的关键消息；组装顺序稳定 | Context |
+| **上下文构建器** | 按会话状态 + 预算阈值动态组装 System Prompt 和消息列表；执行上下文压缩（Full Compact / Trim） | 压缩时不丢失 System Prompt；组装顺序稳定 | Context |
 | **状态管理者** | 持久化会话消息历史（SQLite）；管理 Checkpoint 快照的创建/恢复/修剪；执行过期会话的自动清理 | 同会话并发写串行化（sessionLock）；消息追加原子化 | Session |
 | **技能注入器** | 从文件系统扫描 SKILL.md；管理会话级 Skill 激活状态；按激活列表将 Skill Prompt 注入 System Prompt 的技能段落 | project 层覆盖 global 层（同名去重）；单文件大小限制 1MB | Skills |
 | **远程执行代理** | 在远程/本机独立进程中接收 Gateway 的工具执行请求；校验 Capability Token；在本地完成工具执行并返回结果 | 主动连接 Gateway（反向连接）；不开放入站端口；受 WorkdirAllowlist 限制 | Runner |
@@ -718,7 +718,7 @@ D4（工具执行可控）要求 AI 的写操作可回滚。Checkpoint 在每次
 
 ### 8.6 Context（Prompt 构建与上下文压缩）
 
-**存在理由：** "AI 看到了什么"是一个独立于"AI 怎么推理"的架构关注点。将 Context 从 Runtime 中分离出来，意味着 Compact 策略（MicroCompact / Full Compact / Trim）可以独立演进，不需要修改推理循环。
+**存在理由：** "AI 看到了什么"是一个独立于"AI 怎么推理"的架构关注点。将 Context 从 Runtime 中分离出来，意味着 Compact 策略（Full Compact / Trim）可以独立演进，不需要修改推理循环。
 
 **拥有的决策权：** System Prompt 的组装顺序（`corePrompt → capabilities → rules → taskState → planModeContext → todos → skillPrompt → repositoryContext → systemState` 的固定顺序）；Compact 何时触发、采用什么级别（Micro vs Full vs Trim）；哪些消息不能被压缩（Pin 标记）。
 
@@ -827,7 +827,7 @@ sequenceDiagram
 
 **触发条件：** 每轮推理前 `prepareTurnBudgetSnapshot` 检测到 Token 消耗接近预算阈值（基于 Provider 的 `EstimateInputTokens` 估算 + 配置的 `compact_trigger_ratio`）。
 
-**参与组件：** Runtime → Context Builder → MicroCompact → Compact Runner (Provider) → Session Store
+**参与组件：** Runtime → Context Builder → Compact Runner (Provider) → Session Store
 
 **流程：**
 
@@ -841,8 +841,6 @@ sequenceDiagram
     CC-->>RT: needsCompact = true
 
     RT->>CC: Compact(input)
-    CC->>CC: MicroCompact: 对可压缩 tool_result 摘要化
-    alt MicroCompact 不足
         CC->>CC: Full Compact: CompactRunner.Generate() 生成结构化摘要
     end
     CC->>CC: Trim: 裁剪最旧消息（保留 System Prompt + Pin 标记）
@@ -855,8 +853,7 @@ sequenceDiagram
 
 | 级别 | 触发条件 | 操作 | 对上下文的影响 |
 |------|----------|------|---------------|
-| **MicroCompact** | 单次 Tool Call 结果过大，导致本轮预算紧张 | 对单个 tool_result 内容摘要化（保留关键输出，丢弃冗长中间日志） | 仅影响当前工具结果，不改变历史 |
-| **Full Compact** | MicroCompact 后仍超预算，或累计历史消息过多 | 将历史消息中可压缩的部分通过 LLM 生成结构化摘要，替换原始消息 | 历史消息被摘要替代，System Prompt + 最近 N 轮保留 |
+| **Full Compact** | 累计历史消息过多 | 将历史消息中可压缩的部分通过 LLM 生成结构化摘要，替换原始消息 | 历史消息被摘要替代，System Prompt + 最近 N 轮保留 |
 
 **关键不变量：**
 - System Prompt（corePrompt + capabilities + rules + skillPrompt）永不参与压缩
@@ -1065,7 +1062,7 @@ sequenceDiagram
 
     opt 若 Token 预算接近阈值
         RT->>CTX: Compact(session)
-        CTX->>CTX: MicroCompact(tool_results) → FullCompact(history)
+        CTX->>CTX: FullCompact(history)
         CTX->>SS: ReplaceTranscript()
     end
 
@@ -1773,7 +1770,6 @@ SessionID（会话级） + RunID（单次运行级）
 |------|------|
 | **ReAct Loop** | Reasoning + Acting 循环：模型推理 → 解析工具调用 → 执行工具 → 回灌结果 → 继续推理，直到产出最终文本回复 |
 | **Compact** | 上下文压缩：当对话历史累积到接近 Token 预算上限时，自动将历史消息摘要化或裁剪，以释放上下文空间 |
-| **MicroCompact** | 轻量级压缩：仅对单个 tool_result 内容做摘要化，不改变消息列表结构。是 Compact 的第一阶段 |
 | **StreamRelay** | 流式中继：Gateway 内部将 Runtime 的异步事件按 SessionID/RunID 广播到所有订阅客户端连接的 pub/sub 机制 |
 | **Checkpoint** | 代码版本快照：AI 执行写操作前自动创建的文件状态快照，支持恢复和 Diff 查看 |
 | **Human-in-the-loop** | 人机协作模式：AI 在执行可能危险的操作（如写文件、执行 Bash）前暂停，等待人类审批 |

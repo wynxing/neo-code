@@ -1,12 +1,12 @@
 package codebase
 
 import (
+	"neo-code/internal/tools"
 	"context"
 	"encoding/json"
 	"strings"
 
 	"neo-code/internal/repository"
-	"neo-code/internal/tools"
 )
 
 // SearchTextTool implements the codebase_search_text tool.
@@ -51,10 +51,6 @@ func (t *SearchTextTool) Schema() map[string]any {
 		},
 		"required": []string{"query"},
 	}
-}
-
-func (t *SearchTextTool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyCompact
 }
 
 func (t *SearchTextTool) Execute(ctx context.Context, call tools.ToolCallInput) (tools.ToolResult, error) {
