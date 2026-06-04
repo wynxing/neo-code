@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"neo-code/internal/tools"
 	"net"
 	"net/http"
 	"net/url"
@@ -13,7 +14,6 @@ import (
 	"time"
 
 	"neo-code/internal/config"
-	"neo-code/internal/tools"
 )
 
 const (
@@ -114,11 +114,6 @@ func (t *Tool) Schema() map[string]any {
 		},
 		"required": []string{"url"},
 	}
-}
-
-// MicroCompactPolicy 声明 webfetch 工具的历史结果默认参与 micro compact 清理。
-func (t *Tool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyCompact
 }
 
 func (t *Tool) Execute(ctx context.Context, call tools.ToolCallInput) (tools.ToolResult, error) {

@@ -88,7 +88,7 @@ runtime 不再消费旧的 builder 压缩建议，而是使用冻结快照上的
 - 组装 `system prompt`
 - 读取 `AGENTS.md`
 - 注入 `Task State` / `Todo State` / `Skills` / `Memo`
-- 执行 read-time trim 和 micro compact
+- 执行 read-time trim
 - 输出最终 `SystemPrompt` 与消息列表
 
 `context.Builder` 不再负责：

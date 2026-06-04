@@ -13,7 +13,6 @@ const (
 	DefaultBudgetReserveTokens             = 13000
 	DefaultBudgetFallbackPromptBudget      = 100000
 	DefaultBudgetMaxReactiveCompacts       = 3
-	DefaultMicroCompactRetainedToolSpans   = 6
 	DefaultCompactReadTimeMaxMessageSpans  = 24
 	DefaultAskMaxInputTokens               = 8000
 	DefaultAskRetainTurns                  = 5
@@ -30,13 +29,11 @@ type ContextConfig struct {
 }
 
 type CompactConfig struct {
-	ManualStrategy                string `yaml:"manual_strategy,omitempty"`
-	ManualKeepRecentMessages      int    `yaml:"manual_keep_recent_messages,omitempty"`
-	MaxSummaryChars               int    `yaml:"max_summary_chars,omitempty"`
-	MicroCompactDisabled          bool   `yaml:"micro_compact_disabled,omitempty"`
-	MicroCompactRetainedToolSpans int    `yaml:"micro_compact_retained_tool_spans,omitempty"`
-	ReadTimeMaxMessageSpans       int    `yaml:"read_time_max_message_spans,omitempty"`
-	MaxArchivedPromptChars        int    `yaml:"max_archived_prompt_chars,omitempty"`
+	ManualStrategy           string `yaml:"manual_strategy,omitempty"`
+	ManualKeepRecentMessages int    `yaml:"manual_keep_recent_messages,omitempty"`
+	MaxSummaryChars          int    `yaml:"max_summary_chars,omitempty"`
+	ReadTimeMaxMessageSpans  int    `yaml:"read_time_max_message_spans,omitempty"`
+	MaxArchivedPromptChars   int    `yaml:"max_archived_prompt_chars,omitempty"`
 }
 
 // BudgetConfig 定义上下文预算控制面的配置。
@@ -76,11 +73,10 @@ func defaultBudgetConfig() BudgetConfig {
 // defaultCompactConfig 返回手动 compact 策略的默认配置。
 func defaultCompactConfig() CompactConfig {
 	return CompactConfig{
-		ManualStrategy:                CompactManualStrategyKeepRecent,
-		ManualKeepRecentMessages:      DefaultCompactManualKeepRecentMessages,
-		MaxSummaryChars:               DefaultCompactMaxSummaryChars,
-		MicroCompactRetainedToolSpans: DefaultMicroCompactRetainedToolSpans,
-		ReadTimeMaxMessageSpans:       DefaultCompactReadTimeMaxMessageSpans,
+		ManualStrategy:           CompactManualStrategyKeepRecent,
+		ManualKeepRecentMessages: DefaultCompactManualKeepRecentMessages,
+		MaxSummaryChars:          DefaultCompactMaxSummaryChars,
+		ReadTimeMaxMessageSpans:  DefaultCompactReadTimeMaxMessageSpans,
 	}
 }
 
@@ -142,9 +138,6 @@ func (c *CompactConfig) ApplyDefaults(defaults CompactConfig) {
 	}
 	if c.MaxSummaryChars <= 0 {
 		c.MaxSummaryChars = defaults.MaxSummaryChars
-	}
-	if c.MicroCompactRetainedToolSpans <= 0 {
-		c.MicroCompactRetainedToolSpans = defaults.MicroCompactRetainedToolSpans
 	}
 	if c.ReadTimeMaxMessageSpans <= 0 {
 		c.ReadTimeMaxMessageSpans = defaults.ReadTimeMaxMessageSpans

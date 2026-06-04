@@ -259,12 +259,8 @@ func NewWithFactory(
 		toolManager = tools.NewRegistry()
 	}
 	if contextBuilder == nil {
-		contextBuilder = agentcontext.NewConfiguredBuilder(agentcontext.MicroCompactConfig{
-			Policies:    toolManager,
-			Summarizers: toolManager,
-		})
+		contextBuilder = agentcontext.NewConfiguredBuilder()
 	}
-
 	service := &Service{
 		configManager:      configManager,
 		sessionStore:       sessionStore,

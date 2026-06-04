@@ -3,10 +3,10 @@ package codebase
 import (
 	"context"
 	"encoding/json"
+	"neo-code/internal/tools"
 	"strings"
 
 	"neo-code/internal/repository"
-	"neo-code/internal/tools"
 )
 
 // ReadTool implements the codebase_read tool.
@@ -47,10 +47,6 @@ func (t *ReadTool) Schema() map[string]any {
 		},
 		"required": []string{"path"},
 	}
-}
-
-func (t *ReadTool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyPreserveHistory
 }
 
 func (t *ReadTool) Execute(ctx context.Context, call tools.ToolCallInput) (tools.ToolResult, error) {

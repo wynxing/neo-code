@@ -4,13 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"neo-code/internal/tools"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-
-	"neo-code/internal/tools"
 )
 
 type GlobTool struct {
@@ -59,11 +58,6 @@ func (t *GlobTool) Schema() map[string]any {
 		},
 		"required": []string{"pattern"},
 	}
-}
-
-// MicroCompactPolicy 声明 glob 工具的历史结果默认参与 micro compact 清理。
-func (t *GlobTool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyCompact
 }
 
 func (t *GlobTool) Execute(ctx context.Context, input tools.ToolCallInput) (tools.ToolResult, error) {

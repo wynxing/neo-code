@@ -130,10 +130,6 @@ func (t *askUserTool) Schema() map[string]any {
 	}
 }
 
-func (t *askUserTool) MicroCompactPolicy() MicroCompactPolicy {
-	return MicroCompactPolicyPreserveHistory
-}
-
 func (t *askUserTool) Execute(ctx context.Context, call ToolCallInput) (ToolResult, error) {
 	if t.broker == nil {
 		return NewErrorResult(ToolNameAskUser, "ask_user broker not available", "ask_user broker is nil", nil), fmt.Errorf("tools: ask_user broker is nil")

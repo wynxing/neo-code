@@ -1129,15 +1129,11 @@ func TestCompactConfigDefaultsAndRoundTrip(t *testing.T) {
 			compactCfg.ReadTimeMaxMessageSpans,
 		)
 	}
-	if compactCfg.MicroCompactDisabled {
-		t.Fatalf("expected micro compact to be enabled by default")
-	}
 
 	cfg.Context.Compact.ManualStrategy = CompactManualStrategyFullReplace
 	cfg.Context.Compact.ManualKeepRecentMessages = 2
 	cfg.Context.Compact.MaxSummaryChars = 900
 	cfg.Context.Compact.ReadTimeMaxMessageSpans = 30
-	cfg.Context.Compact.MicroCompactDisabled = true
 	if err := loader.Save(context.Background(), cfg); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
@@ -1151,9 +1147,6 @@ func TestCompactConfigDefaultsAndRoundTrip(t *testing.T) {
 	}
 	if strings.Contains(text, "manual_keep_recent_spans:") {
 		t.Fatalf("expected persisted config to drop legacy manual_keep_recent_spans key, got:\n%s", text)
-	}
-	if !strings.Contains(text, "micro_compact_disabled: true") {
-		t.Fatalf("expected persisted config to include micro_compact_disabled, got:\n%s", text)
 	}
 	if !strings.Contains(text, "read_time_max_message_spans: 30") {
 		t.Fatalf("expected persisted config to include read_time_max_message_spans, got:\n%s", text)
@@ -1174,9 +1167,6 @@ func TestCompactConfigDefaultsAndRoundTrip(t *testing.T) {
 	}
 	if reloaded.Context.Compact.ReadTimeMaxMessageSpans != 30 {
 		t.Fatalf("expected read_time_max_message_spans=30, got %d", reloaded.Context.Compact.ReadTimeMaxMessageSpans)
-	}
-	if !reloaded.Context.Compact.MicroCompactDisabled {
-		t.Fatalf("expected micro_compact_disabled to persist")
 	}
 }
 
