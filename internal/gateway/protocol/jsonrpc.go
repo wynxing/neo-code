@@ -63,6 +63,8 @@ const (
 	MethodGatewayCheckpointDiff = "checkpoint.diff"
 	// MethodGatewayResolvePermission 表示提交权限审批决策。
 	MethodGatewayResolvePermission = "gateway.resolvePermission"
+	// MethodGatewayApprovePlan 表示批准当前 draft 计划 revision。
+	MethodGatewayApprovePlan = "gateway.approvePlan"
 	// MethodGatewayUserQuestionAnswer 表示提交 ask_user 回答。
 	MethodGatewayUserQuestionAnswer = "gateway.userQuestionAnswer"
 	// MethodGatewayDeleteSession 表示删除/归档会话。
@@ -138,6 +140,8 @@ const (
 	GatewayCodeUnsupportedAction = "unsupported_action"
 	// GatewayCodeInternalError 表示网关内部错误。
 	GatewayCodeInternalError = "internal_error"
+	// GatewayCodeMaxTurnExceeded 表示 runtime 达到单次运行最大轮数后受控停止。
+	GatewayCodeMaxTurnExceeded = "max_turn_exceeded"
 	// GatewayCodeTimeout 表示网关处理请求时发生超时。
 	GatewayCodeTimeout = "timeout"
 	// GatewayCodeUnsafePath 表示路径存在安全风险。
@@ -246,6 +250,7 @@ const (
 // RunInputMedia 用于承载 gateway.run 中图片分片的媒体元数据。
 type RunInputMedia struct {
 	URI      string `json:"uri"`
+	AssetID  string `json:"asset_id,omitempty"`
 	MimeType string `json:"mime_type"`
 	FileName string `json:"file_name,omitempty"`
 }
@@ -364,6 +369,13 @@ type CheckpointDiffParams struct {
 type ResolvePermissionParams struct {
 	RequestID string `json:"request_id"`
 	Decision  string `json:"decision"`
+}
+
+// ApprovePlanParams 表示 gateway.approvePlan 参数。
+type ApprovePlanParams struct {
+	SessionID string `json:"session_id"`
+	PlanID    string `json:"plan_id"`
+	Revision  int    `json:"revision"`
 }
 
 // UserQuestionAnswerParams 表示 gateway.userQuestionAnswer 参数。
@@ -779,6 +791,15 @@ func NormalizeJSONRPCRequest(request JSONRPCRequest) (NormalizedRequest, *JSONRP
 		normalized.Action = "resolve_permission"
 		normalized.Payload = params
 		return normalized, nil
+	case MethodGatewayApprovePlan:
+		params, parseErr := decodeApprovePlanParams(request.Params)
+		if parseErr != nil {
+			return normalized, parseErr
+		}
+		normalized.Action = "approve_plan"
+		normalized.SessionID = strings.TrimSpace(params.SessionID)
+		normalized.Payload = params
+		return normalized, nil
 	case MethodGatewayUserQuestionAnswer:
 		params, parseErr := decodeUserQuestionAnswerParams(request.Params)
 		if parseErr != nil {
@@ -1183,7 +1204,8 @@ func MapGatewayCodeToJSONRPCCode(gatewayCode string) int {
 		GatewayCodeUnsafePath,
 		GatewayCodeUnauthorized,
 		GatewayCodeAccessDenied,
-		GatewayCodeResourceNotFound:
+		GatewayCodeResourceNotFound,
+		GatewayCodeMaxTurnExceeded:
 		return JSONRPCCodeInvalidParams
 	case GatewayCodeInternalError:
 		return JSONRPCCodeInternalError
@@ -1381,6 +1403,7 @@ func decodeRunParams(raw json.RawMessage) (RunParams, *JSONRPCError) {
 				p.InputParts[i].Text = strings.TrimSpace(p.InputParts[i].Text)
 				if m := p.InputParts[i].Media; m != nil {
 					m.URI = strings.TrimSpace(m.URI)
+					m.AssetID = strings.TrimSpace(m.AssetID)
 					m.MimeType = strings.TrimSpace(m.MimeType)
 					m.FileName = strings.TrimSpace(m.FileName)
 				}
@@ -1509,6 +1532,24 @@ func decodeResolvePermissionParams(raw json.RawMessage) (ResolvePermissionParams
 		case "allow_once", "allow_session", "reject":
 		default:
 			return NewJSONRPCError(JSONRPCCodeInvalidParams, "invalid field: params.decision", GatewayCodeInvalidAction)
+		}
+		return nil
+	})
+}
+
+// decodeApprovePlanParams 对 gateway.approvePlan 的 params 执行反序列化与字段校验。
+func decodeApprovePlanParams(raw json.RawMessage) (ApprovePlanParams, *JSONRPCError) {
+	return decodeParams(raw, "gateway.approvePlan", func(p *ApprovePlanParams) *JSONRPCError {
+		p.SessionID = strings.TrimSpace(p.SessionID)
+		p.PlanID = strings.TrimSpace(p.PlanID)
+		if p.SessionID == "" {
+			return NewJSONRPCError(JSONRPCCodeInvalidParams, "missing required field: params.session_id", GatewayCodeMissingRequiredField)
+		}
+		if p.PlanID == "" {
+			return NewJSONRPCError(JSONRPCCodeInvalidParams, "missing required field: params.plan_id", GatewayCodeMissingRequiredField)
+		}
+		if p.Revision <= 0 {
+			return NewJSONRPCError(JSONRPCCodeInvalidParams, "invalid field: params.revision", GatewayCodeInvalidAction)
 		}
 		return nil
 	})

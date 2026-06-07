@@ -43,13 +43,11 @@ type persistedContextConfig struct {
 }
 
 type persistedCompactConfig struct {
-	ManualStrategy                string `yaml:"manual_strategy,omitempty"`
-	ManualKeepRecentMessages      int    `yaml:"manual_keep_recent_messages,omitempty"`
-	MaxSummaryChars               int    `yaml:"max_summary_chars,omitempty"`
-	MicroCompactDisabled          bool   `yaml:"micro_compact_disabled,omitempty"`
-	MicroCompactRetainedToolSpans int    `yaml:"micro_compact_retained_tool_spans,omitempty"`
-	ReadTimeMaxMessageSpans       int    `yaml:"read_time_max_message_spans,omitempty"`
-	MaxArchivedPromptChars        int    `yaml:"max_archived_prompt_chars,omitempty"`
+	ManualStrategy           string `yaml:"manual_strategy,omitempty"`
+	ManualKeepRecentMessages int    `yaml:"manual_keep_recent_messages,omitempty"`
+	MaxSummaryChars          int    `yaml:"max_summary_chars,omitempty"`
+	ReadTimeMaxMessageSpans  int    `yaml:"read_time_max_message_spans,omitempty"`
+	MaxArchivedPromptChars   int    `yaml:"max_archived_prompt_chars,omitempty"`
 }
 
 type persistedBudgetConfig struct {
@@ -284,13 +282,11 @@ func marshalPersistedConfig(snapshot Config) ([]byte, error) {
 func newPersistedContextConfig(cfg ContextConfig) persistedContextConfig {
 	return persistedContextConfig{
 		Compact: persistedCompactConfig{
-			ManualStrategy:                cfg.Compact.ManualStrategy,
-			ManualKeepRecentMessages:      cfg.Compact.ManualKeepRecentMessages,
-			MaxSummaryChars:               cfg.Compact.MaxSummaryChars,
-			MicroCompactDisabled:          cfg.Compact.MicroCompactDisabled,
-			MicroCompactRetainedToolSpans: cfg.Compact.MicroCompactRetainedToolSpans,
-			ReadTimeMaxMessageSpans:       cfg.Compact.ReadTimeMaxMessageSpans,
-			MaxArchivedPromptChars:        cfg.Compact.MaxArchivedPromptChars,
+			ManualStrategy:           cfg.Compact.ManualStrategy,
+			ManualKeepRecentMessages: cfg.Compact.ManualKeepRecentMessages,
+			MaxSummaryChars:          cfg.Compact.MaxSummaryChars,
+			ReadTimeMaxMessageSpans:  cfg.Compact.ReadTimeMaxMessageSpans,
+			MaxArchivedPromptChars:   cfg.Compact.MaxArchivedPromptChars,
 		},
 		Budget: persistedBudgetConfig{
 			PromptBudget:         cfg.Budget.PromptBudget,
@@ -310,13 +306,11 @@ func newPersistedContextConfig(cfg ContextConfig) persistedContextConfig {
 func fromPersistedContextConfig(file persistedContextConfig, defaults ContextConfig) ContextConfig {
 	out := ContextConfig{
 		Compact: CompactConfig{
-			ManualStrategy:                strings.TrimSpace(file.Compact.ManualStrategy),
-			ManualKeepRecentMessages:      file.Compact.ManualKeepRecentMessages,
-			MaxSummaryChars:               file.Compact.MaxSummaryChars,
-			MicroCompactDisabled:          file.Compact.MicroCompactDisabled,
-			MicroCompactRetainedToolSpans: file.Compact.MicroCompactRetainedToolSpans,
-			ReadTimeMaxMessageSpans:       file.Compact.ReadTimeMaxMessageSpans,
-			MaxArchivedPromptChars:        file.Compact.MaxArchivedPromptChars,
+			ManualStrategy:           strings.TrimSpace(file.Compact.ManualStrategy),
+			ManualKeepRecentMessages: file.Compact.ManualKeepRecentMessages,
+			MaxSummaryChars:          file.Compact.MaxSummaryChars,
+			ReadTimeMaxMessageSpans:  file.Compact.ReadTimeMaxMessageSpans,
+			MaxArchivedPromptChars:   file.Compact.MaxArchivedPromptChars,
 		},
 		Budget: BudgetConfig{
 			PromptBudget:         file.Budget.PromptBudget,

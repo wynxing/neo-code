@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"neo-code/internal/tools"
 	"os"
 	"strings"
 
 	"neo-code/internal/security"
-	"neo-code/internal/tools"
 )
 
 type DeleteFileTool struct {
@@ -42,10 +42,6 @@ func (t *DeleteFileTool) Schema() map[string]any {
 		},
 		"required": []string{"path"},
 	}
-}
-
-func (t *DeleteFileTool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyCompact
 }
 
 func (t *DeleteFileTool) Execute(ctx context.Context, input tools.ToolCallInput) (tools.ToolResult, error) {
@@ -88,7 +84,7 @@ func (t *DeleteFileTool) Execute(ctx context.Context, input tools.ToolCallInput)
 		return tools.NewErrorResult(t.Name(), tools.NormalizeErrorReason(t.Name(), statErr), "", nil), statErr
 	}
 	if info.IsDir() {
-		err := errors.New(deleteFileToolName + ": path is a directory; use filesystem_remove_dir")
+		err := errors.New(deleteFileToolName + ": path is a directory")
 		return tools.NewErrorResult(t.Name(), tools.NormalizeErrorReason(t.Name(), err), "", nil), err
 	}
 

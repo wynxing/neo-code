@@ -37,9 +37,6 @@ func TestNewAskUserToolDefaults(t *testing.T) {
 	if _, ok := schema["properties"]; !ok {
 		t.Fatalf("expected schema with properties")
 	}
-	if tool.MicroCompactPolicy() != MicroCompactPolicyPreserveHistory {
-		t.Fatalf("expected PreserveHistory policy, got %v", tool.MicroCompactPolicy())
-	}
 }
 
 func TestAskUserToolSchemaHasRequiredFields(t *testing.T) {

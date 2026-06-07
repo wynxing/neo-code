@@ -344,6 +344,7 @@ func convertProtocolRunInputParts(parts []protocol.RunInputPart) []InputPart {
 		if part.Media != nil {
 			convertedPart.Media = &Media{
 				URI:      strings.TrimSpace(part.Media.URI),
+				AssetID:  strings.TrimSpace(part.Media.AssetID),
 				MimeType: strings.TrimSpace(part.Media.MimeType),
 				FileName: strings.TrimSpace(part.Media.FileName),
 			}
@@ -365,6 +366,7 @@ func requiresSession(action FrameAction) bool {
 		FrameActionActivateSessionSkill,
 		FrameActionDeactivateSessionSkill,
 		FrameActionListSessionSkills,
+		FrameActionApprovePlan,
 		FrameActionDeleteSession,
 		FrameActionRenameSession,
 		FrameActionSetSessionModel,

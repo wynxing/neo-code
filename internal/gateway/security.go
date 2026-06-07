@@ -4,7 +4,12 @@ import (
 	"strings"
 )
 
-const pingMethod = "gateway.ping"
+const (
+	pingMethod               = "gateway.ping"
+	sessionAssetUploadMethod = "gateway.sessionAssetUpload"
+	sessionAssetReadMethod   = "gateway.sessionAssetRead"
+	sessionAssetDeleteMethod = "gateway.sessionAssetDelete"
+)
 
 // RequestSource 表示控制面请求来源，用于 ACL 与日志分类。
 type RequestSource string
@@ -72,6 +77,7 @@ func fullControlPlaneMethods() map[string]struct{} {
 		"checkpoint.undoRestore",
 		"checkpoint.diff",
 		"gateway.resolvePermission",
+		"gateway.approvePlan",
 		"gateway.userQuestionAnswer",
 		"gateway.user_question_answer",
 		"gateway.deleteSession",
@@ -97,6 +103,9 @@ func fullControlPlaneMethods() map[string]struct{} {
 		"gateway.renameWorkspace",
 		"gateway.deleteWorkspace",
 		"wake.openUrl",
+		sessionAssetUploadMethod,
+		sessionAssetReadMethod,
+		sessionAssetDeleteMethod,
 	}
 	return normalizedMethodSet(methods...)
 }

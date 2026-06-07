@@ -1,5 +1,6 @@
 import {
   EventType,
+  StopReason,
   type AcceptanceDecidedPayload,
   type BashSideEffectPayload,
   type BudgetCheckedPayload,
@@ -13,6 +14,7 @@ import {
   type MessageFrame,
   type PermissionRequestPayload,
   type PendingUserQuestionSnapshot,
+  type PlanUpdatedPayload,
   type TodoEventPayload,
   type TokenUsage,
   type VerificationCompletedPayload,
@@ -52,7 +54,13 @@ let _pendingNextRunRollbackCheckpointId: string | undefined;
 let _currentRollbackRunId: string | undefined;
 // 标记 pending 基线已应用到哪个 run；切到下一 run 时自动失效。
 let _pendingRollbackAppliedRunId: string | undefined;
+// plan 模式下先缓存文本流，等待结构化 plan_updated 决定最终展示。
+let _planChunkBufferByRunId = new Map<string, string>();
+let _planUpdatedRunIds = new Set<string>();
+let _maxTurnToastRunIds = new Set<string>();
 const CHECKPOINT_REASON_PRE_RESTORE_GUARD = "pre_restore_guard";
+const MAX_TURN_EXCEEDED_MESSAGE =
+  "已达到本次运行最大轮数，可继续发送消息或调高 runtime.max_turns";
 
 /** 重置模块级游标 —— 在截断聊天历史 / 切换会话等场景调用，避免后续事件挂到已被移除的消息上 */
 export function resetEventBridgeCursors() {
@@ -68,6 +76,9 @@ export function resetEventBridgeCursors() {
   _pendingNextRunRollbackCheckpointId = keepCheckpointBaseline
     ? _pendingNextRunRollbackCheckpointId
     : undefined;
+  _planChunkBufferByRunId = new Map<string, string>();
+  _planUpdatedRunIds = new Set<string>();
+  _maxTurnToastRunIds = new Set<string>();
   _latestRunDiffRequestId += 1;
   if (!keepCheckpointBaseline) {
     _latestRestoreSyncRequestId += 1;
@@ -202,8 +213,6 @@ const FILE_WRITE_TOOLS = new Set([
   "filesystem_write_file",
   "filesystem_edit",
   "filesystem_delete_file",
-  "filesystem_move_file",
-  "filesystem_copy_file",
 ]);
 
 /** 从 ToolStart 事件提取文件路径并立即填充面板（+0/-0 占位，等 tool_diff 覆盖真实数据） */
@@ -218,16 +227,7 @@ function _trackFileChangeFromTool(toolName: string, argsRaw: string) {
   }
 
   // 统一用 pending 占位，真实状态由 tool_diff/run diff 事件覆盖
-  if (
-    toolName === "filesystem_move_file" ||
-    toolName === "filesystem_copy_file"
-  ) {
-    const src = typeof args.source_path === "string" ? args.source_path : "";
-    const dst =
-      typeof args.destination_path === "string" ? args.destination_path : "";
-    if (src) _upsertFileChange(src, "pending");
-    if (dst) _upsertFileChange(dst, "pending");
-  } else {
+  {
     const path = typeof args.path === "string" ? args.path : "";
     if (path) _upsertFileChange(path, "pending");
   }
@@ -373,7 +373,8 @@ function _refreshRunFileChanges(
     .then((result) => {
       if (requestId !== _latestRunDiffRequestId) return;
       if (runId !== useGatewayStore.getState().currentRunId) return;
-      if (sessionId !== useSessionStore.getState().currentSessionId) return;
+      const currentSessionId = useSessionStore.getState().currentSessionId;
+      if (currentSessionId && sessionId !== currentSessionId) return;
       if (!result?.payload) return;
       if (result.payload.warning) {
         useUIStore
@@ -532,13 +533,52 @@ function normalizeUserQuestionRequestedPayload(
   };
 }
 
-const CRITICAL_EVENTS = new Set<string>([EventType.Error]);
-const SESSION_AGNOSTIC_EVENTS = new Set<string>([
-  EventType.Error,
-]);
+const CRITICAL_EVENTS = new Set<string>([EventType.Error, EventType.RunError]);
+const SESSION_AGNOSTIC_EVENTS = new Set<string>([EventType.Error]);
 
 function strField(payload: unknown, key: string): string {
   return ((payload as PayloadRecord)?.[key] as string) ?? "";
+}
+
+function getRunKey(frameRunId: string | undefined): string {
+  return (frameRunId || useGatewayStore.getState().currentRunId || "").trim();
+}
+
+function isCurrentRunScopedTerminalEvent(
+  eventType: string,
+  frameRunId: string | undefined,
+): boolean {
+  if (eventType !== EventType.RunError) return false;
+  const eventRunId = (frameRunId || "").trim();
+  const currentRunId = useGatewayStore.getState().currentRunId.trim();
+  return (
+    eventRunId !== "" &&
+    currentRunId !== "" &&
+    eventRunId === currentRunId
+  );
+}
+
+function isMaxTurnExceeded(reason: string, code = ""): boolean {
+  return (
+    reason === StopReason.MaxTurnExceeded ||
+    code === StopReason.MaxTurnExceeded
+  );
+}
+
+function showMaxTurnExceededToastOnce(frameRunId: string | undefined) {
+  const runKey = getRunKey(frameRunId) || "__unknown_run__";
+  if (_maxTurnToastRunIds.has(runKey)) return;
+  _maxTurnToastRunIds.add(runKey);
+  useUIStore.getState().showToast(MAX_TURN_EXCEEDED_MESSAGE, "error");
+}
+
+function extractAgentDoneContent(eventPayload: unknown): string {
+  const parts = (eventPayload as { parts?: { text?: string }[] } | undefined)
+    ?.parts;
+  if (parts && Array.isArray(parts)) {
+    return parts.map((p) => p?.text ?? "").join("");
+  }
+  return strField(eventPayload, "content");
 }
 
 function resolveCompactMode(payload: unknown): string {
@@ -564,7 +604,9 @@ function compactMessageForMode(mode: string): string {
 
 function compactErrorMessageForMode(mode: string, message: string): string {
   if (mode === "proactive" || mode === "reactive") {
-    return message ? `Auto context compaction failed: ${message}` : "Auto context compaction failed";
+    return message
+      ? `Auto context compaction failed: ${message}`
+      : "Auto context compaction failed";
   }
   return message || "Compaction failed";
 }
@@ -625,7 +667,11 @@ export function handleGatewayEvent(
   const payload = frame.payload as PayloadRecord;
   if (!payload) return;
 
-  const innerEnvelope = payload.payload as PayloadRecord;
+  const rawInnerPayload = payload.payload;
+  const innerEnvelope =
+    rawInnerPayload && typeof rawInnerPayload === "object"
+      ? (rawInnerPayload as PayloadRecord)
+      : undefined;
   const eventType =
     (innerEnvelope?.runtime_event_type as string | undefined) ??
     (payload.event_type as string | undefined);
@@ -647,12 +693,16 @@ export function handleGatewayEvent(
     frameSessionId &&
     currentSessionId &&
     frameSessionId !== currentSessionId &&
-    !SESSION_AGNOSTIC_EVENTS.has(eventType)
+    !SESSION_AGNOSTIC_EVENTS.has(eventType) &&
+    !isCurrentRunScopedTerminalEvent(eventType, frameRunId)
   ) {
     return;
   }
 
-  const eventPayload = innerEnvelope?.payload;
+  const eventPayload =
+    innerEnvelope?.runtime_event_type !== undefined
+      ? innerEnvelope.payload
+      : rawInnerPayload;
 
   const chatStore = useChatStore.getState();
   const uiStore = useUIStore.getState();
@@ -678,6 +728,16 @@ export function handleGatewayEvent(
       }
       const text = eventPayload as string | undefined;
       if (!text) break;
+      if (chatStore.agentMode === "plan") {
+        const runKey = getRunKey(frameRunId);
+        if (runKey) {
+          _planChunkBufferByRunId.set(
+            runKey,
+            (_planChunkBufferByRunId.get(runKey) ?? "") + text,
+          );
+        }
+        break;
+      }
       if (!chatStore.streamingMessageId) {
         chatStore.startStreamingMessage();
       }
@@ -685,20 +745,60 @@ export function handleGatewayEvent(
       break;
     }
 
+    case EventType.PlanUpdated: {
+      if (chatStore.streamingThinkingMessageId) {
+        chatStore.finalizeThinkingMessage();
+      }
+      const payload = eventPayload as PlanUpdatedPayload | undefined;
+      if (payload?.current_plan) {
+        const activeStreamingID = useChatStore.getState().streamingMessageId;
+        if (activeStreamingID) {
+          useChatStore.getState().removeMessage(activeStreamingID);
+          useChatStore.getState().setStreamingMessageId("");
+        }
+        const runKey = getRunKey(frameRunId);
+        if (runKey) {
+          _planUpdatedRunIds.add(runKey);
+          _planChunkBufferByRunId.delete(runKey);
+        }
+        useChatStore
+          .getState()
+          .upsertPlanMessage(payload.current_plan, payload.display_text);
+      }
+      break;
+    }
+
     case EventType.AgentDone: {
       if (chatStore.streamingThinkingMessageId) {
         chatStore.finalizeThinkingMessage();
       }
-      if (chatStore.streamingMessageId) {
-        const parts = (
-          eventPayload as { parts?: { text?: string }[] } | undefined
-        )?.parts;
-        const content =
-          parts && Array.isArray(parts)
-            ? parts.map((p) => p?.text ?? "").join("")
-            : strField(eventPayload, "content");
-        chatStore.finalizeMessage(chatStore.streamingMessageId, content);
+      const runKey = getRunKey(frameRunId);
+      const content = extractAgentDoneContent(eventPayload);
+      if (runKey && _planUpdatedRunIds.has(runKey)) {
+        if (chatStore.streamingMessageId) {
+          const streamingID = chatStore.streamingMessageId;
+          chatStore.finalizeMessage(streamingID, "");
+          useChatStore.getState().removeMessage(streamingID);
+        }
+        _planUpdatedRunIds.delete(runKey);
+        _planChunkBufferByRunId.delete(runKey);
+        chatStore.setGenerating(false);
+        chatStore.finalizeRunningToolCalls("done");
+        if (frameSessionId) {
+          useSessionStore
+            .getState()
+            .fetchSessions(gatewayAPI, true)
+            .catch(() => {});
+        }
+        break;
       }
+      if (chatStore.streamingMessageId) {
+        chatStore.finalizeMessage(chatStore.streamingMessageId, content);
+      } else if (content) {
+        const id = chatStore.startStreamingMessage();
+        useChatStore.getState().finalizeMessage(id, content);
+      }
+      if (runKey) _planChunkBufferByRunId.delete(runKey);
       chatStore.setGenerating(false);
       chatStore.finalizeRunningToolCalls("done");
       if (frameSessionId) {
@@ -851,6 +951,21 @@ export function handleGatewayEvent(
       break;
     }
 
+    case EventType.RunError: {
+      const code = strField(eventPayload, "code");
+      const reason = strField(eventPayload, "stop_reason");
+      const message = strField(eventPayload, "message") || "Run failed";
+      useChatStore.getState().resetGeneratingState();
+      useChatStore.getState().finalizeRunningToolCalls("error");
+      if (isMaxTurnExceeded(reason, code)) {
+        useChatStore.getState().setStopReason(StopReason.MaxTurnExceeded);
+        showMaxTurnExceededToastOnce(frameRunId);
+      } else {
+        uiStore.showToast(message, "error");
+      }
+      break;
+    }
+
     case EventType.StopReasonDecided: {
       const reason = strField(eventPayload, "reason");
       const detail = strField(eventPayload, "detail");
@@ -861,6 +976,10 @@ export function handleGatewayEvent(
       }
       if (reason === "fatal_error") {
         uiStore.showToast(detail || "模型调用失败，请检查配置", "error");
+      }
+      if (reason === StopReason.MaxTurnExceeded) {
+        useChatStore.getState().finalizeRunningToolCalls("error");
+        showMaxTurnExceededToastOnce(frameRunId);
       }
       break;
     }
@@ -967,10 +1086,13 @@ export function handleGatewayEvent(
       if (payload) {
         insightStore.addTodoEvent(payload);
         if (payload.items) {
+          const clearConflict =
+            payload.action === "reset" ||
+            (payload.items.length === 0 && payload.summary?.total === 0);
           insightStore.applyTodoSnapshot({
             items: payload.items,
             summary: payload.summary,
-          });
+          }, { clearConflict });
         }
       }
       break;

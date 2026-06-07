@@ -26,7 +26,6 @@
 |--------|------|------|-------------|
 | **底层传输层 IPC 残留** | `internal/gateway/transport/` — Unix domain socket / Named pipe | 客户端连接路径复杂（需判断平台选 socket 类型），迁移到全 HTTP 后可消除 | 短期——已在迁移计划中 |
 | **`runtime/run.go` 单文件过长** | ReAct 主循环逻辑集中在 `run.go` (~400 行) 和 `runtime.go` (~540 行) | 新成员理解核心循环需要较长时间；修改风险集中在少数大文件中 | 中期——可按阶段拆分（pre-processing / loop body / termination） |
-| **Compact 策略配置分散** | MicroCompact 配置在 `MicroCompactConfig`，Full Compact 在 `CompactConfig`，部分阈值在 `RuntimeConfig` | 调整上下文管理策略需要理解三处配置 | 中期——收敛为统一的 `CompactPolicy` 结构体 |
 | **Gateway Bootstrap 单文件** | `bootstrap.go` 超过 1600 行，包含帧路由、认证、session CRUD、RPC 处理 | 单体文件难以定位和维护 | 中期——拆分为 `session_handler.go`、`rpc_handler.go`、`auth_handler.go` |
 | **Acceptance 测试耗时长** | `runtime/acceptance/` 的端到端测试依赖真实模型 API | CI 成本高、不稳定（网络波动导致 flaky） | 长期——增加录制/回放（VCR）模式，CI 中默认使用录制的 fixture |
 

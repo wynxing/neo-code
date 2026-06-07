@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"neo-code/internal/config"
@@ -47,6 +48,28 @@ type PermissionResolutionInput struct {
 	RequestID string `json:"request_id"`
 	// Decision 是审批决策值。
 	Decision PermissionResolutionDecision `json:"decision"`
+}
+
+// ApprovePlanInput 表示批准当前计划 draft revision 的输入。
+type ApprovePlanInput struct {
+	// SubjectID 是请求方身份主体标识。
+	SubjectID string `json:"subject_id,omitempty"`
+	// SessionID 是计划所属会话标识。
+	SessionID string `json:"session_id"`
+	// PlanID 是目标计划标识。
+	PlanID string `json:"plan_id"`
+	// Revision 是待批准的计划 revision。
+	Revision int `json:"revision"`
+}
+
+// ApprovePlanResult 表示批准计划后的稳定返回结构。
+type ApprovePlanResult struct {
+	// PlanID 是已批准计划标识。
+	PlanID string `json:"plan_id"`
+	// Revision 是已批准 revision。
+	Revision int `json:"revision"`
+	// Status 是批准后的计划状态，当前固定为 approved。
+	Status string `json:"status"`
 }
 
 // RunInput 表示网关向下游运行端口发起 run 动作时的输入。
@@ -203,6 +226,58 @@ type CreateSessionInput struct {
 	SubjectID string
 	// SessionID 是可选会话标识，留空时由 runtime 生成。
 	SessionID string
+}
+
+// SessionAssetMeta 描述 Gateway 可见的会话附件元数据。
+type SessionAssetMeta struct {
+	// SessionID 是附件所属会话标识。
+	SessionID string `json:"session_id"`
+	// AssetID 是附件标识。
+	AssetID string `json:"asset_id"`
+	// MimeType 是服务端确认后的 MIME 类型。
+	MimeType string `json:"mime_type"`
+	// Size 是附件原始字节数。
+	Size int64 `json:"size"`
+}
+
+// SaveSessionAssetInput 表示保存浏览器上传附件的下游输入。
+type SaveSessionAssetInput struct {
+	// SubjectID 是请求方身份主体标识。
+	SubjectID string
+	// SessionID 是附件所属会话标识。
+	SessionID string
+	// Reader 是附件二进制内容。
+	Reader io.Reader
+	// MimeType 是服务端探测确认后的 MIME 类型。
+	MimeType string
+}
+
+// OpenSessionAssetInput 表示读取会话附件的下游输入。
+type OpenSessionAssetInput struct {
+	// SubjectID 是请求方身份主体标识。
+	SubjectID string
+	// SessionID 是附件所属会话标识。
+	SessionID string
+	// AssetID 是附件标识。
+	AssetID string
+}
+
+// DeleteSessionAssetInput 表示删除会话附件的下游输入。
+type DeleteSessionAssetInput struct {
+	// SubjectID 是请求方身份主体标识。
+	SubjectID string
+	// SessionID 是附件所属会话标识。
+	SessionID string
+	// AssetID 是附件标识。
+	AssetID string
+}
+
+// OpenSessionAssetResult 表示打开会话附件后的读取结果。
+type OpenSessionAssetResult struct {
+	// Reader 是附件内容流，调用方负责关闭。
+	Reader io.ReadCloser
+	// Meta 是附件元数据。
+	Meta SessionAssetMeta
 }
 
 // DeleteSessionInput 表示 gateway.deleteSession 动作的下游输入。
@@ -672,12 +747,54 @@ type SessionMessage struct {
 	Role string `json:"role"`
 	// Content 是消息内容。
 	Content string `json:"content"`
+	// Parts 是消息的结构化多模态分片，供支持图片的客户端渲染。
+	Parts []InputPart `json:"parts,omitempty"`
 	// ToolCalls 是 assistant 发起的工具调用元数据。
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	// ToolCallID 是工具消息关联的调用标识。
 	ToolCallID string `json:"tool_call_id,omitempty"`
 	// IsError 表示该消息是否为错误结果。
 	IsError bool `json:"is_error,omitempty"`
+}
+
+// PlanTodoItem 表示计划正文中保留的 legacy todo 项，仅用于展示和兼容读取。
+type PlanTodoItem struct {
+	ID            string   `json:"id"`
+	Content       string   `json:"content"`
+	Status        string   `json:"status,omitempty"`
+	Required      bool     `json:"required,omitempty"`
+	Artifacts     []string `json:"artifacts,omitempty"`
+	FailureReason string   `json:"failure_reason,omitempty"`
+	BlockedReason string   `json:"blocked_reason,omitempty"`
+	Revision      int64    `json:"revision,omitempty"`
+}
+
+// PlanSpec 表示当前完整计划的公开结构。
+type PlanSpec struct {
+	Goal          string         `json:"goal"`
+	Steps         []string       `json:"steps,omitempty"`
+	Constraints   []string       `json:"constraints,omitempty"`
+	Todos         []PlanTodoItem `json:"todos,omitempty"`
+	OpenQuestions []string       `json:"open_questions,omitempty"`
+}
+
+// PlanSummaryView 表示完整计划的紧凑摘要。
+type PlanSummaryView struct {
+	Goal          string   `json:"goal"`
+	KeySteps      []string `json:"key_steps,omitempty"`
+	Constraints   []string `json:"constraints,omitempty"`
+	ActiveTodoIDs []string `json:"active_todo_ids,omitempty"`
+}
+
+// PlanArtifact 表示会话当前计划快照。
+type PlanArtifact struct {
+	ID        string          `json:"id"`
+	Revision  int             `json:"revision"`
+	Status    string          `json:"status"`
+	Spec      PlanSpec        `json:"spec"`
+	Summary   PlanSummaryView `json:"summary"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
 }
 
 // Session 表示网关视角的会话详情。
@@ -698,6 +815,8 @@ type Session struct {
 	Model string `json:"model,omitempty"`
 	// AgentMode 是会话当前 Agent 工作模式。
 	AgentMode string `json:"agent_mode,omitempty"`
+	// CurrentPlan 是会话当前结构化计划快照。
+	CurrentPlan *PlanArtifact `json:"current_plan,omitempty"`
 	// Messages 是会话消息快照。
 	Messages []SessionMessage `json:"messages,omitempty"`
 }
@@ -882,6 +1001,22 @@ type RuntimePort interface {
 	UndoRestore(ctx context.Context, input UndoRestoreInput) (CheckpointRestoreResult, error)
 	// CheckpointDiff 查询两个相邻代码检查点之间的差异。
 	CheckpointDiff(ctx context.Context, input CheckpointDiffInput) (CheckpointDiffResult, error)
+}
+
+// SessionAssetPort 定义 Gateway HTTP 资产端点访问会话附件的独立下游端口。
+type SessionAssetPort interface {
+	// SaveSessionAsset 保存会话附件并返回元数据。
+	SaveSessionAsset(ctx context.Context, input SaveSessionAssetInput) (SessionAssetMeta, error)
+	// OpenSessionAsset 打开会话附件供 HTTP 读取接口返回。
+	OpenSessionAsset(ctx context.Context, input OpenSessionAssetInput) (OpenSessionAssetResult, error)
+	// DeleteSessionAsset 删除已上传但不再需要的会话附件。
+	DeleteSessionAsset(ctx context.Context, input DeleteSessionAssetInput) error
+}
+
+// PlanApprovalRuntimePort 定义批准计划的可选下游能力。
+type PlanApprovalRuntimePort interface {
+	// ApprovePlan 将指定 draft 计划 revision 推进到 approved。
+	ApprovePlan(ctx context.Context, input ApprovePlanInput) (ApprovePlanResult, error)
 }
 
 // ManagementRuntimePort 定义前端管理面访问配置能力的可选下游端口。

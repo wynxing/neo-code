@@ -33,9 +33,6 @@ func TestSearchTextToolMetadata(t *testing.T) {
 	if _, hasQuery := props["query"]; !hasQuery {
 		t.Fatalf("Schema should have query property")
 	}
-	if tool.MicroCompactPolicy() != tools.MicroCompactPolicyCompact {
-		t.Fatalf("MicroCompactPolicy() = %v, want Compact", tool.MicroCompactPolicy())
-	}
 }
 
 func TestSearchTextToolInvalidJSON(t *testing.T) {

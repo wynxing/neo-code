@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"neo-code/internal/tools"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"neo-code/internal/security"
-	"neo-code/internal/tools"
 )
 
 const emitChunkSize = 4 * 1024
@@ -61,11 +61,6 @@ func (t *ReadFileTool) Schema() map[string]any {
 		},
 		"required": []string{"path"},
 	}
-}
-
-// MicroCompactPolicy 声明读文件工具的历史结果默认参与 micro compact 清理。
-func (t *ReadFileTool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyCompact
 }
 
 func (t *ReadFileTool) Execute(ctx context.Context, input tools.ToolCallInput) (tools.ToolResult, error) {

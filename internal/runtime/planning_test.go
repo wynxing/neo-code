@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -130,6 +131,29 @@ func TestMaybeParsePlanTurnOutputIgnoresBraceTextAndKeepsExplanation(t *testing.
 	want := "We should avoid `{broken}` examples in docs.\n\nThen execute the plan in small steps."
 	if output.DisplayText != want {
 		t.Fatalf("DisplayText = %q, want %q", output.DisplayText, want)
+	}
+}
+
+func TestMaybeParsePlanTurnOutputStripsHTMLCommentJSON(t *testing.T) {
+	t.Parallel()
+
+	markdown := "### Goal\n\nShip plan display\n\n### Steps\n\n- Align prompts"
+	text := markdown + "\n\n<!-- {\"plan_spec\":{\"goal\":\"Ship plan display\",\"steps\":[\"Align prompts\"],\"constraints\":[\"Keep parser stable\"],\"open_questions\":[]},\"summary_candidate\":{\"goal\":\"Ship plan display\",\"key_steps\":[\"Align prompts\"],\"constraints\":[\"Keep parser stable\"]}} -->"
+	output, ok, err := maybeParsePlanTurnOutput(providertypes.Message{
+		Role:  providertypes.RoleAssistant,
+		Parts: []providertypes.ContentPart{providertypes.NewTextPart(text)},
+	})
+	if err != nil {
+		t.Fatalf("maybeParsePlanTurnOutput() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected HTML comment plan JSON to be detected")
+	}
+	if output.PlanSpec.Goal != "Ship plan display" {
+		t.Fatalf("PlanSpec.Goal = %q", output.PlanSpec.Goal)
+	}
+	if output.DisplayText != markdown {
+		t.Fatalf("DisplayText = %q, want %q", output.DisplayText, markdown)
 	}
 }
 
@@ -512,7 +536,8 @@ func TestApproveCurrentPlanValidationErrors(t *testing.T) {
 	t.Parallel()
 
 	session := agentsession.New("approve validation")
-	if err := approveCurrentPlan(&session, "plan-1", 1); err == nil {
+	if err := approveCurrentPlan(&session, "plan-1", 1); !errors.Is(err, ErrPlanApprovalCurrentPlanMissing) ||
+		!IsPlanApprovalInvalidError(err) {
 		t.Fatal("expected error when current plan does not exist")
 	}
 
@@ -526,15 +551,18 @@ func TestApproveCurrentPlanValidationErrors(t *testing.T) {
 		},
 	}
 
-	if err := approveCurrentPlan(&session, "plan-2", 2); err == nil {
-		t.Fatal("expected id mismatch error")
+	if err := approveCurrentPlan(&session, "plan-2", 2); !errors.Is(err, ErrPlanApprovalPlanIDMismatch) ||
+		!IsPlanApprovalInvalidError(err) {
+		t.Fatalf("expected id mismatch error, got %v", err)
 	}
-	if err := approveCurrentPlan(&session, "plan-1", 1); err == nil {
-		t.Fatal("expected revision mismatch error")
+	if err := approveCurrentPlan(&session, "plan-1", 1); !errors.Is(err, ErrPlanApprovalRevisionMismatch) ||
+		!IsPlanApprovalInvalidError(err) {
+		t.Fatalf("expected revision mismatch error, got %v", err)
 	}
 
 	session.CurrentPlan.Status = agentsession.PlanStatusApproved
-	if err := approveCurrentPlan(&session, "plan-1", 2); err == nil {
-		t.Fatal("expected status mismatch error")
+	if err := approveCurrentPlan(&session, "plan-1", 2); !errors.Is(err, ErrPlanApprovalStatusInvalid) ||
+		!IsPlanApprovalInvalidError(err) {
+		t.Fatalf("expected status mismatch error, got %v", err)
 	}
 }

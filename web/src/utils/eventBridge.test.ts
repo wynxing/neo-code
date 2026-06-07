@@ -30,11 +30,13 @@ beforeEach(() => {
     compactMode: "",
     compactMessage: "",
     streamingMessageId: "",
+    streamingThinkingMessageId: "",
     permissionRequests: [],
     pendingUserQuestion: null,
     tokenUsage: null,
     phase: "",
     stopReason: "",
+    agentMode: "build",
   } as any);
   useGatewayStore.setState({
     connectionState: "disconnected",
@@ -103,6 +105,278 @@ describe("eventBridge", () => {
     expect(useChatStore.getState().messages[0].content).toBe("Hello");
   });
 
+  it("suppresses plan chunks and renders plan_updated as a plan card", () => {
+    const api = createMockGatewayAPI();
+    useChatStore.getState().setAgentMode("plan");
+
+    handleGatewayEvent(
+      {
+        type: EventType.AgentChunk,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.AgentChunk,
+            payload: '{"plan_spec":',
+          },
+        },
+        run_id: "run-plan",
+      },
+      api,
+    );
+    expect(useChatStore.getState().messages).toHaveLength(0);
+
+    handleGatewayEvent(
+      {
+        type: EventType.PlanUpdated,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.PlanUpdated,
+            payload: {
+              current_plan: {
+                id: "plan-1",
+                revision: 1,
+                status: "draft",
+                spec: {
+                  goal: "修复计划展示",
+                  steps: ["发事件"],
+                  constraints: ["不显示 JSON"],
+                  open_questions: ["是否审批"],
+                },
+                summary: { goal: "修复计划展示", key_steps: ["发事件"] },
+                created_at: "2026-05-20T00:00:00Z",
+                updated_at: "2026-05-20T00:00:00Z",
+              },
+            },
+          },
+        },
+        run_id: "run-plan",
+      },
+      api,
+    );
+
+    handleGatewayEvent(
+      {
+        type: EventType.AgentDone,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.AgentDone,
+            payload: { parts: [{ text: "目标\n修复计划展示" }] },
+          },
+        },
+        run_id: "run-plan",
+      },
+      api,
+    );
+
+    const msgs = useChatStore.getState().messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({
+      role: "assistant",
+      type: "plan",
+      planData: { id: "plan-1", revision: 1 },
+    });
+  });
+
+  it("removes leaked streaming planning JSON when plan_updated arrives", () => {
+    const api = createMockGatewayAPI();
+
+    handleGatewayEvent(
+      {
+        type: EventType.AgentChunk,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.AgentChunk,
+            payload: '```json\n{"plan_spec":{"goal":"leaked json"',
+          },
+        },
+        run_id: "run-plan",
+      },
+      api,
+    );
+    expect(useChatStore.getState().messages).toHaveLength(1);
+
+    handleGatewayEvent(
+      {
+        type: EventType.PlanUpdated,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.PlanUpdated,
+            payload: {
+              current_plan: {
+                id: "plan-1",
+                revision: 1,
+                status: "draft",
+                spec: {
+                  goal: "Readable markdown plan",
+                  steps: ["Show a card"],
+                },
+                summary: {
+                  goal: "Readable markdown plan",
+                  key_steps: ["Show a card"],
+                },
+                created_at: "2026-05-20T00:00:00Z",
+                updated_at: "2026-05-20T00:00:00Z",
+              },
+              display_text:
+                "### Goal\n\nReadable markdown plan\n\n### Steps\n\n- Show a card",
+            },
+          },
+        },
+        run_id: "run-plan",
+      },
+      api,
+    );
+
+    const msgs = useChatStore.getState().messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({
+      type: "plan",
+      content:
+        "### Goal\n\nReadable markdown plan\n\n### Steps\n\n- Show a card",
+    });
+    expect(msgs[0].content).not.toContain("plan_spec");
+  });
+
+  it("appends a new plan card for a new plan revision", () => {
+    const api = createMockGatewayAPI();
+    const planPayload = (revision: number, goal: string) => ({
+      current_plan: {
+        id: "plan-1",
+        revision,
+        status: "draft",
+        spec: {
+          goal,
+          steps: [`step ${revision}`],
+        },
+        summary: {
+          goal,
+          key_steps: [`step ${revision}`],
+        },
+        created_at: "2026-05-20T00:00:00Z",
+        updated_at: "2026-05-20T00:00:00Z",
+      },
+      display_text: `### Goal\n\n${goal}`,
+    });
+
+    handleGatewayEvent(
+      {
+        type: EventType.PlanUpdated,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.PlanUpdated,
+            payload: planPayload(1, "first plan"),
+          },
+        },
+        run_id: "run-plan-1",
+      },
+      api,
+    );
+    useChatStore.getState().addMessage({
+      id: "user-2",
+      role: "user",
+      type: "text",
+      content: "revise it",
+      timestamp: 2,
+    });
+    handleGatewayEvent(
+      {
+        type: EventType.PlanUpdated,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.PlanUpdated,
+            payload: planPayload(2, "second plan"),
+          },
+        },
+        run_id: "run-plan-2",
+      },
+      api,
+    );
+
+    const msgs = useChatStore.getState().messages;
+    expect(msgs).toHaveLength(3);
+    expect(msgs[0]).toMatchObject({
+      type: "plan",
+      planData: { id: "plan-1", revision: 1 },
+      content: "### Goal\n\nfirst plan",
+    });
+    expect(msgs[1]).toMatchObject({ role: "user", content: "revise it" });
+    expect(msgs[2]).toMatchObject({
+      type: "plan",
+      planData: { id: "plan-1", revision: 2 },
+      content: "### Goal\n\nsecond plan",
+    });
+  });
+
+  it("updates an existing card for the same plan revision", () => {
+    const api = createMockGatewayAPI();
+    const payload = (display_text: string) => ({
+      current_plan: {
+        id: "plan-1",
+        revision: 1,
+        status: "draft",
+        spec: {
+          goal: "same revision",
+          steps: ["step"],
+        },
+        summary: {
+          goal: "same revision",
+          key_steps: ["step"],
+        },
+        created_at: "2026-05-20T00:00:00Z",
+        updated_at: "2026-05-20T00:00:00Z",
+      },
+      display_text,
+    });
+
+    for (const displayText of ["first display", "updated display"]) {
+      handleGatewayEvent(
+        {
+          type: EventType.PlanUpdated,
+          payload: {
+            payload: {
+              runtime_event_type: EventType.PlanUpdated,
+              payload: payload(displayText),
+            },
+          },
+          run_id: "run-plan-1",
+        },
+        api,
+      );
+    }
+
+    const msgs = useChatStore.getState().messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({
+      type: "plan",
+      planData: { id: "plan-1", revision: 1 },
+      content: "updated display",
+    });
+  });
+
+  it("AgentDone creates a message when provider did not stream chunks", () => {
+    const api = createMockGatewayAPI();
+    handleGatewayEvent(
+      {
+        type: EventType.AgentDone,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.AgentDone,
+            payload: { parts: [{ text: "final answer" }] },
+          },
+        },
+        run_id: "run-plain",
+      },
+      api,
+    );
+
+    const msgs = useChatStore.getState().messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({
+      type: "text",
+      content: "final answer",
+      streaming: false,
+    });
+  });
+
   it("drops stale session events after session switch for tool and chunk updates", () => {
     const api = createMockGatewayAPI();
     useSessionStore.setState({ currentSessionId: "sess-new" } as any);
@@ -150,7 +424,10 @@ describe("eventBridge", () => {
       {
         type: EventType.AgentChunk,
         payload: {
-          payload: { runtime_event_type: EventType.AgentChunk, payload: "stale chunk" },
+          payload: {
+            runtime_event_type: EventType.AgentChunk,
+            payload: "stale chunk",
+          },
         },
         session_id: "sess-old",
         run_id: "run-old",
@@ -171,7 +448,9 @@ describe("eventBridge", () => {
       useGatewayStore.getState(),
       "setCurrentRunId",
     );
-    const listSessions = vi.fn().mockResolvedValue({ payload: { sessions: [] } });
+    const listSessions = vi
+      .fn()
+      .mockResolvedValue({ payload: { sessions: [] } });
     const api = createMockGatewayAPI({ listSessions });
     useSessionStore.setState({ currentSessionId: "sess-new" } as any);
     useGatewayStore.setState({ currentRunId: "run-current" } as any);
@@ -210,7 +489,9 @@ describe("eventBridge", () => {
       useGatewayStore.getState(),
       "setCurrentRunId",
     );
-    const listSessions = vi.fn().mockResolvedValue({ payload: { sessions: [] } });
+    const listSessions = vi
+      .fn()
+      .mockResolvedValue({ payload: { sessions: [] } });
     const api = createMockGatewayAPI({ listSessions });
 
     handleGatewayEvent(
@@ -411,7 +692,9 @@ describe("eventBridge", () => {
     );
 
     expect(useChatStore.getState().permissionRequests).toHaveLength(1);
-    expect(useChatStore.getState().permissionRequests[0].request_id).toBe("perm-1");
+    expect(useChatStore.getState().permissionRequests[0].request_id).toBe(
+      "perm-1",
+    );
 
     handleGatewayEvent(
       {
@@ -704,6 +987,214 @@ describe("eventBridge", () => {
     expect(useChatStore.getState().messages[0].toolStatus).toBe("error");
   });
 
+  it("StopReasonDecided marks running tool calls as error and shows max-turn toast", () => {
+    const api = createMockGatewayAPI();
+    useChatStore.getState().addMessage({
+      id: "tool-running-max-turn",
+      role: "tool",
+      type: "tool_call",
+      content: "",
+      toolName: "bash",
+      toolCallId: "tc-max-turn",
+      toolStatus: "running",
+      timestamp: Date.now(),
+    });
+    useChatStore.getState().setGenerating(true);
+
+    handleGatewayEvent(
+      {
+        type: EventType.StopReasonDecided,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.StopReasonDecided,
+            payload: { reason: "max_turn_exceeded", detail: "runtime: max turn limit reached (40)" },
+          },
+        },
+        session_id: "sess-1",
+        run_id: "run-max-turn",
+      },
+      api,
+    );
+
+    expect(useChatStore.getState().isGenerating).toBe(false);
+    expect(useChatStore.getState().stopReason).toBe("max_turn_exceeded");
+    expect(useChatStore.getState().messages[0].toolStatus).toBe("error");
+    expect(useUIStore.getState().toasts.at(-1)?.message).toBe(
+      "已达到本次运行最大轮数，可继续发送消息或调高 runtime.max_turns",
+    );
+    useSessionStore.setState({ currentSessionId: "" } as any);
+    useGatewayStore.setState({ currentRunId: "" } as any);
+  });
+
+  it("RunError with max-turn stop reason uses explicit max-turn UX instead of generic run failed", () => {
+    const api = createMockGatewayAPI();
+    useChatStore.getState().addMessage({
+      id: "tool-running-run-error",
+      role: "tool",
+      type: "tool_call",
+      content: "",
+      toolName: "bash",
+      toolCallId: "tc-run-error",
+      toolStatus: "running",
+      timestamp: Date.now(),
+    });
+    useChatStore.getState().setGenerating(true);
+
+    handleGatewayEvent(
+      {
+        type: EventType.RunError,
+        payload: {
+          event_type: EventType.RunError,
+          payload: {
+            code: "max_turn_exceeded",
+            message: "runtime: max turn limit reached (40)",
+            stop_reason: "max_turn_exceeded",
+          },
+        },
+        session_id: "sess-1",
+        run_id: "run-max-turn-error",
+      },
+      api,
+    );
+
+    expect(useChatStore.getState().isGenerating).toBe(false);
+    expect(useChatStore.getState().stopReason).toBe("max_turn_exceeded");
+    expect(useChatStore.getState().messages[0].toolStatus).toBe("error");
+    expect(useUIStore.getState().toasts.at(-1)?.message).toBe(
+      "已达到本次运行最大轮数，可继续发送消息或调高 runtime.max_turns",
+    );
+    expect(
+      useUIStore.getState().toasts.some((toast) => toast.message === "runtime: max turn limit reached (40)"),
+    ).toBe(false);
+  });
+
+  it("RunError with max-turn stop reason is handled during session mismatch", () => {
+    const api = createMockGatewayAPI();
+    useSessionStore.setState({ currentSessionId: "sess-current" } as any);
+    useGatewayStore.setState({ currentRunId: "run-max-turn-mismatch" } as any);
+    useChatStore.getState().addMessage({
+      id: "tool-running-run-error-mismatch",
+      role: "tool",
+      type: "tool_call",
+      content: "",
+      toolName: "bash",
+      toolCallId: "tc-run-error-mismatch",
+      toolStatus: "running",
+      timestamp: Date.now(),
+    });
+    useChatStore.getState().setGenerating(true);
+
+    handleGatewayEvent(
+      {
+        type: EventType.RunError,
+        payload: {
+          event_type: EventType.RunError,
+          payload: {
+            code: "max_turn_exceeded",
+            message: "runtime: max turn limit reached (40)",
+            stop_reason: "max_turn_exceeded",
+          },
+        },
+        session_id: "sess-stale",
+        run_id: "run-max-turn-mismatch",
+      },
+      api,
+    );
+
+    expect(useChatStore.getState().isGenerating).toBe(false);
+    expect(useChatStore.getState().stopReason).toBe("max_turn_exceeded");
+    expect(useChatStore.getState().messages[0].toolStatus).toBe("error");
+    expect(useUIStore.getState().toasts.at(-1)?.message).toBe(
+      "已达到本次运行最大轮数，可继续发送消息或调高 runtime.max_turns",
+    );
+  });
+
+  it("RunError during session mismatch is ignored when run id is stale", () => {
+    const api = createMockGatewayAPI();
+    useSessionStore.setState({ currentSessionId: "sess-current" } as any);
+    useGatewayStore.setState({ currentRunId: "run-current" } as any);
+    useChatStore.getState().addMessage({
+      id: "tool-running-stale-run-error",
+      role: "tool",
+      type: "tool_call",
+      content: "",
+      toolName: "bash",
+      toolCallId: "tc-stale-run-error",
+      toolStatus: "running",
+      timestamp: Date.now(),
+    });
+    useChatStore.getState().setGenerating(true);
+
+    handleGatewayEvent(
+      {
+        type: EventType.RunError,
+        payload: {
+          event_type: EventType.RunError,
+          payload: {
+            code: "max_turn_exceeded",
+            message: "runtime: max turn limit reached (40)",
+            stop_reason: "max_turn_exceeded",
+          },
+        },
+        session_id: "sess-stale",
+        run_id: "run-stale",
+      },
+      api,
+    );
+
+    expect(useChatStore.getState().isGenerating).toBe(true);
+    expect(useChatStore.getState().stopReason).toBe("");
+    expect(useChatStore.getState().messages[0].toolStatus).toBe("running");
+    expect(useUIStore.getState().toasts).toHaveLength(0);
+    useSessionStore.setState({ currentSessionId: "" } as any);
+    useGatewayStore.setState({ currentRunId: "" } as any);
+  });
+
+  it("RunError for current run is handled while transitioning", () => {
+    const api = createMockGatewayAPI();
+    useSessionStore.setState({ currentSessionId: "sess-current" } as any);
+    useGatewayStore.setState({ currentRunId: "run-transition" } as any);
+    useChatStore.setState({ isTransitioning: true } as any);
+    useChatStore.getState().addMessage({
+      id: "tool-running-transition-run-error",
+      role: "tool",
+      type: "tool_call",
+      content: "",
+      toolName: "bash",
+      toolCallId: "tc-transition-run-error",
+      toolStatus: "running",
+      timestamp: Date.now(),
+    });
+    useChatStore.getState().setGenerating(true);
+
+    handleGatewayEvent(
+      {
+        type: EventType.RunError,
+        payload: {
+          event_type: EventType.RunError,
+          payload: {
+            code: "max_turn_exceeded",
+            message: "runtime: max turn limit reached (40)",
+            stop_reason: "max_turn_exceeded",
+          },
+        },
+        session_id: "sess-stale",
+        run_id: "run-transition",
+      },
+      api,
+    );
+
+    expect(useChatStore.getState().isGenerating).toBe(false);
+    expect(useChatStore.getState().stopReason).toBe("max_turn_exceeded");
+    expect(useChatStore.getState().messages[0].toolStatus).toBe("error");
+    expect(useUIStore.getState().toasts.at(-1)?.message).toBe(
+      "已达到本次运行最大轮数，可继续发送消息或调高 runtime.max_turns",
+    );
+    useSessionStore.setState({ currentSessionId: "" } as any);
+    useGatewayStore.setState({ currentRunId: "" } as any);
+    useChatStore.setState({ isTransitioning: false } as any);
+  });
+
   it("RunCanceled does not convert running tool calls to done", () => {
     const api = createMockGatewayAPI();
     useChatStore.getState().addMessage({
@@ -804,7 +1295,12 @@ describe("eventBridge", () => {
         payload: {
           payload: {
             runtime_event_type: EventType.TokenUsage,
-            payload: { input_tokens: 3, output_tokens: 5, session_input_tokens: 3, session_output_tokens: 5 },
+            payload: {
+              input_tokens: 3,
+              output_tokens: 5,
+              session_input_tokens: 3,
+              session_output_tokens: 5,
+            },
           },
         },
         session_id: "sess-1",
@@ -820,7 +1316,11 @@ describe("eventBridge", () => {
         payload: {
           payload: {
             runtime_event_type: EventType.BudgetEstimateFailed,
-            payload: { attempt_seq: 1, request_hash: "hash-1", message: "no price rule" },
+            payload: {
+              attempt_seq: 1,
+              request_hash: "hash-1",
+              message: "no price rule",
+            },
           },
         },
         session_id: "sess-1",
@@ -828,9 +1328,9 @@ describe("eventBridge", () => {
       },
       api,
     );
-    expect(useRuntimeInsightStore.getState().budgetEstimateFailed?.message).toBe(
-      "no price rule",
-    );
+    expect(
+      useRuntimeInsightStore.getState().budgetEstimateFailed?.message,
+    ).toBe("no price rule");
 
     handleGatewayEvent(
       {
@@ -854,9 +1354,9 @@ describe("eventBridge", () => {
       },
       api,
     );
-    expect(useRuntimeInsightStore.getState().ledgerReconciled?.output_tokens).toBe(
-      5,
-    );
+    expect(
+      useRuntimeInsightStore.getState().ledgerReconciled?.output_tokens,
+    ).toBe(5);
   });
 
   it("CompactStart sets persistent compact state without a toast", () => {
@@ -911,9 +1411,7 @@ describe("eventBridge", () => {
 
   it("CompactApplied clears compact state and shows completion toast", () => {
     const api = createMockGatewayAPI();
-    useChatStore
-      .getState()
-      .startCompacting("manual", "Compacting context...");
+    useChatStore.getState().startCompacting("manual", "Compacting context...");
 
     handleGatewayEvent(
       {
@@ -940,7 +1438,10 @@ describe("eventBridge", () => {
     const api = createMockGatewayAPI();
     useChatStore
       .getState()
-      .startCompacting("proactive", "Context is near the limit. Auto-compacting...");
+      .startCompacting(
+        "proactive",
+        "Context is near the limit. Auto-compacting...",
+      );
 
     handleGatewayEvent(
       {
@@ -963,9 +1464,7 @@ describe("eventBridge", () => {
 
   it("CompactError clears compact state and uses payload message", () => {
     const api = createMockGatewayAPI();
-    useChatStore
-      .getState()
-      .startCompacting("manual", "Compacting context...");
+    useChatStore.getState().startCompacting("manual", "Compacting context...");
 
     handleGatewayEvent(
       {
@@ -992,7 +1491,10 @@ describe("eventBridge", () => {
     const api = createMockGatewayAPI();
     useChatStore
       .getState()
-      .startCompacting("reactive", "Model reported context too long. Compacting and retrying...");
+      .startCompacting(
+        "reactive",
+        "Model reported context too long. Compacting and retrying...",
+      );
 
     handleGatewayEvent(
       {
@@ -1000,7 +1502,10 @@ describe("eventBridge", () => {
         payload: {
           payload: {
             runtime_event_type: EventType.CompactError,
-            payload: { TriggerMode: "reactive", Message: "context still too long" },
+            payload: {
+              TriggerMode: "reactive",
+              Message: "context still too long",
+            },
           },
         },
         session_id: "sess-1",
@@ -1191,6 +1696,56 @@ describe("eventBridge", () => {
     expect(useRuntimeInsightStore.getState().todoSnapshot?.items?.[0].id).toBe(
       "t1",
     );
+  });
+
+  it("TodoSnapshotUpdated reset clears stale TodoConflict", () => {
+    const api = createMockGatewayAPI();
+    handleGatewayEvent(
+      {
+        type: EventType.TodoConflict,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.TodoConflict,
+            payload: { action: "update", reason: "todo_not_found" },
+          },
+        },
+        session_id: "sess-1",
+        run_id: "run-1",
+      },
+      api,
+    );
+    expect(useRuntimeInsightStore.getState().todoConflict?.reason).toBe(
+      "todo_not_found",
+    );
+
+    handleGatewayEvent(
+      {
+        type: EventType.TodoSnapshotUpdated,
+        payload: {
+          payload: {
+            runtime_event_type: EventType.TodoSnapshotUpdated,
+            payload: {
+              action: "reset",
+              reason: "new_user_run",
+              items: [],
+              summary: {
+                total: 0,
+                required_total: 0,
+                required_completed: 0,
+                required_failed: 0,
+                required_open: 0,
+              },
+            },
+          },
+        },
+        session_id: "sess-1",
+        run_id: "run-2",
+      },
+      api,
+    );
+
+    expect(useRuntimeInsightStore.getState().todoConflict).toBeNull();
+    expect(useRuntimeInsightStore.getState().todoSnapshot?.items).toEqual([]);
   });
 
   it("TodoUpdated clears TodoConflict", () => {
@@ -1945,7 +2500,9 @@ describe("eventBridge", () => {
       );
     }
 
-    const toastMessages = useUIStore.getState().toasts.map((toast) => toast.message);
+    const toastMessages = useUIStore
+      .getState()
+      .toasts.map((toast) => toast.message);
     expect(toastMessages).toContain("Skill activated: skill-a");
     expect(toastMessages).toContain("Skill deactivated: skill-a");
     expect(toastMessages).toContain("Skill unavailable: skill-b");
@@ -2010,10 +2567,12 @@ describe("eventBridge", () => {
       .messages.find((m) => m.type === "tool_call");
     expect((toolMsg as any)?.checkpointId).toBeUndefined();
     expect((toolMsg as any)?.checkpointStatus).toBeUndefined();
-    expect(useRuntimeInsightStore.getState().checkpointEvents[0]).toMatchObject({
-      checkpoint_id: "cp1",
-      reason: "pre_write",
-    });
+    expect(useRuntimeInsightStore.getState().checkpointEvents[0]).toMatchObject(
+      {
+        checkpoint_id: "cp1",
+        reason: "pre_write",
+      },
+    );
   });
 
   it("CheckpointCreated with pre_restore_guard does not override latest rollback baseline", () => {
@@ -3013,7 +3572,7 @@ describe("eventBridge", () => {
             runtime_event_type: EventType.ToolDiff,
             payload: {
               tool_call_id: "tc-move",
-              tool_name: "filesystem_move_file",
+              tool_name: "filesystem_write_file",
               file_path: "old.txt",
               files: [
                 { path: "old.txt", kind: "deleted" },

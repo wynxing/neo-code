@@ -320,25 +320,11 @@ func validateRepoHookItem(item config.RuntimeHookItemConfig) error {
 	if strings.TrimSpace(item.ID) == "" {
 		return fmt.Errorf("id is required")
 	}
-	point := strings.ToLower(strings.TrimSpace(item.Point))
-	switch point {
-	case string(runtimehooks.HookPointBeforeToolCall),
-		string(runtimehooks.HookPointAfterToolResult),
-		string(runtimehooks.HookPointBeforeCompletionDecision),
-		string(runtimehooks.HookPointAcceptGate),
-		string(runtimehooks.HookPointBeforePermissionDecision),
-		string(runtimehooks.HookPointAfterToolFailure),
-		string(runtimehooks.HookPointSessionStart),
-		string(runtimehooks.HookPointSessionEnd),
-		string(runtimehooks.HookPointUserPromptSubmit),
-		string(runtimehooks.HookPointPreCompact),
-		string(runtimehooks.HookPointPostCompact),
-		string(runtimehooks.HookPointSubAgentStart),
-		string(runtimehooks.HookPointSubAgentStop):
-	default:
+	point := runtimehooks.HookPoint(strings.ToLower(strings.TrimSpace(item.Point)))
+	if _, ok := runtimehooks.HookPointCapabilities(point); !ok {
 		return fmt.Errorf("point %q is not supported", item.Point)
 	}
-	if capability, ok := runtimehooks.HookPointCapabilities(runtimehooks.HookPoint(point)); ok && !capability.UserAllowed {
+	if !runtimehooks.IsRepoAllowed(point) {
 		return fmt.Errorf("point %q does not allow repo hooks", item.Point)
 	}
 	if strings.ToLower(strings.TrimSpace(item.Scope)) != repoHookScopeValue {
@@ -373,31 +359,25 @@ func validateRepoHookItem(item config.RuntimeHookItemConfig) error {
 		default:
 			return fmt.Errorf("handler %q is not supported", item.Handler)
 		}
-		if handler == "warn_on_tool_call" && !runtimeHasWarnOnToolCallTargets(item.Params) {
-			return fmt.Errorf("handler %q requires params.tool_name or params.tool_names", item.Handler)
+		if handler == "warn_on_tool_call" && !runtimehooks.HasHookMatcherConfig(item.Match) {
+			return fmt.Errorf("handler %q requires match", item.Handler)
+		}
+		if runtimehooks.HasHookMatcherConfig(item.Match) {
+			if err := runtimehooks.ValidateHookMatcher(point, item.Match); err != nil {
+				return fmt.Errorf("match: %w", err)
+			}
 		}
 	case repoHookKindCommand:
-		if strings.TrimSpace(readHookParamString(item.Params, "command")) == "" {
-			return fmt.Errorf("kind command requires params.command")
+		if err := runtimehooks.ValidateCommandParams(item.Params); err != nil {
+			return err
+		}
+		if runtimehooks.HasHookMatcherConfig(item.Match) {
+			if err := runtimehooks.ValidateHookMatcher(point, item.Match); err != nil {
+				return fmt.Errorf("match: %w", err)
+			}
 		}
 	}
 	return nil
-}
-
-// runtimeHasWarnOnToolCallTargets 判断 warn_on_tool_call 是否配置了至少一个目标工具。
-func runtimeHasWarnOnToolCallTargets(params map[string]any) bool {
-	if len(params) == 0 {
-		return false
-	}
-	if name := strings.TrimSpace(readHookParamString(params, "tool_name")); name != "" {
-		return true
-	}
-	for _, value := range readHookParamStringSlice(params, "tool_names") {
-		if strings.TrimSpace(value) != "" {
-			return true
-		}
-	}
-	return false
 }
 
 // evaluateWorkspaceTrust 根据 trust store 判断 workspace 是否可信并附带容错诊断。

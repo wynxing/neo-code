@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"neo-code/internal/tools"
 	"strings"
 
 	"neo-code/internal/memo"
-	"neo-code/internal/tools"
 )
 
 const listToolName = tools.ToolNameMemoList
@@ -42,11 +42,6 @@ func (t *ListTool) Schema() map[string]any {
 			"scope": memoScopePropertySchema(),
 		},
 	}
-}
-
-// MicroCompactPolicy 记忆目录结果应保留在上下文中，不参与 micro compact 清理。
-func (t *ListTool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyPreserveHistory
 }
 
 // Execute 执行 memo_list 工具调用。

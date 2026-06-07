@@ -64,7 +64,7 @@ graph TD
 |------|----------|----------|
 | **LLM 输出不稳定** | 同样的 Prompt，不同模型（甚至同一模型的不同请求）可能产出完全不同的工具调用策略和代码质量 | Provider 归一化 + Compact 保持上下文一致性 |
 | **工具执行具有副作用** | 模型决定执行 `rm -rf` 或修改关键配置文件，后果不可撤销 | Security Engine 四层防御 + Checkpoint 自动快照 |
-| **上下文窗口有限** | 模型的 context window 有硬上限（4K–200K tokens），长对话和大代码库必然超限 | Context 模块两级 Compact 策略（MicroCompact / Full Compact） |
+| **上下文窗口有限** | 模型的 context window 有硬上限（4K–200K tokens），长对话和大代码库必然超限 | Context 模块 Compact 策略（Full Compact / Trim） |
 | **多轮任务需要状态管理** | 一次任务可能跨越数十轮推理，中间包含工具调用、审批暂停、错误重试，状态必须一致 | Session 持久化 + Runtime 集中管理会话状态 |
 | **多端接入的一致性** | TUI、Web、Desktop、飞书、CI 脚本需要用统一协议接入，且行为一致 | Gateway 作为唯一 RPC 边界 + JSON-RPC 2.0 标准协议 |
 
@@ -169,7 +169,7 @@ flowchart TD
 
 **第一步：构建上下文。** Runtime 把当前会话状态（消息历史、Todo 列表、激活的 Skills、已批准的 Plan）交给 Context 模块。Context 按固定顺序组装 System Prompt——核心行为准则、工具能力列表、项目规则、当前任务状态、Plan 上下文——然后返回给 Runtime。
 
-**Runtime 为什么不自己拼 Prompt。** Prompt 的组装逻辑是一个独立的关注点。上下文压缩（Compact）的策略——什么时候触发、用 MicroCompact 还是 Full Compact、哪些消息不能裁剪——需要在 Context 模块内独立演进。如果 Runtime 内嵌了 Prompt 拼接，修改压缩策略就需要改推理循环，两者耦合。
+**Runtime 为什么不自己拼 Prompt。** Prompt 的组装逻辑是一个独立的关注点。上下文压缩（Compact）的策略——什么时候触发、哪些消息不能裁剪——需要在 Context 模块内独立演进。如果 Runtime 内嵌了 Prompt 拼接，修改压缩策略就需要改推理循环，两者耦合。
 
 **第二步：调用模型。** Runtime 把组装好的 Prompt 交给 Provider。Provider 是模型厂商的抽象层——它唯一的职责就是把不同厂商的 API 归一化为两个操作：估算 Token 数、发起流式推理。
 
@@ -345,7 +345,6 @@ flowchart LR
 
 **上下文裁剪（Compact）。** 当消息历史的 Token 数接近模型窗口上限时，Context 模块自动触发压缩：
 
-- **MicroCompact**：移除较早的工具调用细节，保留摘要。优先裁剪输出最长的 Tool Result。
 - **Full Compact**：调用 LLM 对整段历史生成摘要，替换原始消息列表。旧消息删除和新摘要插入在同一个 SQLite 事务中完成，保证原子性。
 
 数据回流发生在两处：**工具结果回灌**（Tool Result 写入 Session Messages，供下一轮推理使用）和 **Compact 结果回写**（压缩后的摘要替换原始历史）。

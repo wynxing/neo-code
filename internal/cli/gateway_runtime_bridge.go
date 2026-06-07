@@ -40,6 +40,10 @@ type runtimeRunCanceler interface {
 	CancelRun(runID string) bool
 }
 
+type sessionAssetDeleter interface {
+	DeleteAsset(ctx context.Context, sessionID string, assetID string) error
+}
+
 type runtimeSessionCreator interface {
 	CreateSession(ctx context.Context, id string) (agentsession.Session, error)
 }
@@ -314,6 +318,9 @@ func (b *gatewayRuntimePortBridge) Run(ctx context.Context, input gateway.RunInp
 		return err
 	}
 	err := b.runtime.Submit(ctx, convertGatewayRunInput(input))
+	if agentruntime.IsMaxTurnLimitError(err) {
+		return gateway.NewRuntimeMaxTurnExceededError(err.Error())
+	}
 	if err != nil && isRuntimeNotFoundError(err) {
 		sessionID := strings.TrimSpace(input.SessionID)
 		if sessionID == "" {
@@ -326,7 +333,11 @@ func (b *gatewayRuntimePortBridge) Run(ctx context.Context, input gateway.RunInp
 		if _, createErr := creator.CreateSession(ctx, sessionID); createErr != nil {
 			return err
 		}
-		return b.runtime.Submit(ctx, convertGatewayRunInput(input))
+		retryErr := b.runtime.Submit(ctx, convertGatewayRunInput(input))
+		if agentruntime.IsMaxTurnLimitError(retryErr) {
+			return gateway.NewRuntimeMaxTurnExceededError(retryErr.Error())
+		}
+		return retryErr
 	}
 	return err
 }
@@ -497,6 +508,37 @@ func (b *gatewayRuntimePortBridge) ResolvePermission(ctx context.Context, input 
 	})
 }
 
+// ApprovePlan 将网关计划批准请求转换为 runtime 当前计划批准输入。
+func (b *gatewayRuntimePortBridge) ApprovePlan(
+	ctx context.Context,
+	input gateway.ApprovePlanInput,
+) (gateway.ApprovePlanResult, error) {
+	if err := b.ensureRuntimeAccess(input.SubjectID); err != nil {
+		return gateway.ApprovePlanResult{}, err
+	}
+	approver, ok := b.runtime.(agentruntime.PlanApprover)
+	if !ok {
+		return gateway.ApprovePlanResult{}, fmt.Errorf("gateway runtime bridge: runtime does not support plan approval")
+	}
+	sessionID := strings.TrimSpace(input.SessionID)
+	planID := strings.TrimSpace(input.PlanID)
+	if err := approver.ApproveCurrentPlan(ctx, agentruntime.ApproveCurrentPlanInput{
+		SessionID: sessionID,
+		PlanID:    planID,
+		Revision:  input.Revision,
+	}); err != nil {
+		if agentruntime.IsPlanApprovalInvalidError(err) {
+			return gateway.ApprovePlanResult{}, fmt.Errorf("%w: %v", gateway.ErrRuntimeInvalidAction, err)
+		}
+		return gateway.ApprovePlanResult{}, err
+	}
+	return gateway.ApprovePlanResult{
+		PlanID:   planID,
+		Revision: input.Revision,
+		Status:   "approved",
+	}, nil
+}
+
 // ResolveUserQuestion 将网关 ask_user 回答转发到 runtime。
 func (b *gatewayRuntimePortBridge) ResolveUserQuestion(ctx context.Context, input gateway.UserQuestionAnswerInput) error {
 	if err := b.ensureRuntimeAccess(input.SubjectID); err != nil {
@@ -657,6 +699,108 @@ func (b *gatewayRuntimePortBridge) CreateSession(ctx context.Context, input gate
 		return "", err
 	}
 	return strings.TrimSpace(session.ID), nil
+}
+
+// SaveSessionAsset 将浏览器上传的附件保存到当前工作区的 session asset store。
+func (b *gatewayRuntimePortBridge) SaveSessionAsset(
+	ctx context.Context,
+	input gateway.SaveSessionAssetInput,
+) (gateway.SessionAssetMeta, error) {
+	if err := b.ensureRuntimeAccess(input.SubjectID); err != nil {
+		return gateway.SessionAssetMeta{}, err
+	}
+	sessionID := strings.TrimSpace(input.SessionID)
+	if sessionID == "" {
+		return gateway.SessionAssetMeta{}, gateway.ErrRuntimeResourceNotFound
+	}
+	if b.sessionStore == nil {
+		return gateway.SessionAssetMeta{}, fmt.Errorf("gateway runtime bridge: session store is unavailable")
+	}
+	loader, ok := b.sessionStore.(bridgeSessionLoader)
+	if !ok {
+		return gateway.SessionAssetMeta{}, fmt.Errorf("gateway runtime bridge: session asset store is unavailable")
+	}
+	if _, err := loader.LoadSession(ctx, sessionID); err != nil {
+		if isRuntimeNotFoundError(err) {
+			return gateway.SessionAssetMeta{}, gateway.ErrRuntimeResourceNotFound
+		}
+		return gateway.SessionAssetMeta{}, err
+	}
+	assetStore, ok := b.sessionStore.(agentsession.AssetStore)
+	if !ok || assetStore == nil {
+		return gateway.SessionAssetMeta{}, fmt.Errorf("gateway runtime bridge: session asset store is unavailable")
+	}
+	meta, err := assetStore.SaveAsset(ctx, sessionID, input.Reader, strings.TrimSpace(input.MimeType))
+	if err != nil {
+		return gateway.SessionAssetMeta{}, err
+	}
+	return gateway.SessionAssetMeta{
+		SessionID: sessionID,
+		AssetID:   strings.TrimSpace(meta.ID),
+		MimeType:  strings.TrimSpace(meta.MimeType),
+		Size:      meta.Size,
+	}, nil
+}
+
+// OpenSessionAsset 打开当前工作区的会话附件，供 Gateway HTTP 读取端点流式返回。
+func (b *gatewayRuntimePortBridge) OpenSessionAsset(
+	ctx context.Context,
+	input gateway.OpenSessionAssetInput,
+) (gateway.OpenSessionAssetResult, error) {
+	if err := b.ensureRuntimeAccess(input.SubjectID); err != nil {
+		return gateway.OpenSessionAssetResult{}, err
+	}
+	sessionID := strings.TrimSpace(input.SessionID)
+	assetID := strings.TrimSpace(input.AssetID)
+	if sessionID == "" || assetID == "" {
+		return gateway.OpenSessionAssetResult{}, gateway.ErrRuntimeResourceNotFound
+	}
+	assetStore, ok := b.sessionStore.(agentsession.AssetStore)
+	if !ok || assetStore == nil {
+		return gateway.OpenSessionAssetResult{}, fmt.Errorf("gateway runtime bridge: session asset store is unavailable")
+	}
+	reader, meta, err := assetStore.Open(ctx, sessionID, assetID)
+	if err != nil {
+		if isRuntimeNotFoundError(err) || errors.Is(err, os.ErrNotExist) {
+			return gateway.OpenSessionAssetResult{}, gateway.ErrRuntimeResourceNotFound
+		}
+		return gateway.OpenSessionAssetResult{}, err
+	}
+	return gateway.OpenSessionAssetResult{
+		Reader: reader,
+		Meta: gateway.SessionAssetMeta{
+			SessionID: sessionID,
+			AssetID:   strings.TrimSpace(meta.ID),
+			MimeType:  strings.TrimSpace(meta.MimeType),
+			Size:      meta.Size,
+		},
+	}, nil
+}
+
+// DeleteSessionAsset 删除当前工作区的会话附件，供 Web 在取消上传引用时释放服务端文件。
+func (b *gatewayRuntimePortBridge) DeleteSessionAsset(ctx context.Context, input gateway.DeleteSessionAssetInput) error {
+	if err := b.ensureRuntimeAccess(input.SubjectID); err != nil {
+		return err
+	}
+	sessionID := strings.TrimSpace(input.SessionID)
+	assetID := strings.TrimSpace(input.AssetID)
+	if sessionID == "" || assetID == "" {
+		return gateway.ErrRuntimeResourceNotFound
+	}
+	if b.sessionStore == nil {
+		return fmt.Errorf("gateway runtime bridge: session store is unavailable")
+	}
+	deleter, ok := b.sessionStore.(sessionAssetDeleter)
+	if !ok || deleter == nil {
+		return fmt.Errorf("gateway runtime bridge: session asset store does not support delete")
+	}
+	if err := deleter.DeleteAsset(ctx, sessionID, assetID); err != nil {
+		if isRuntimeNotFoundError(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // DeleteSession 删除/归档指定会话。
@@ -1646,11 +1790,13 @@ func convertGatewayRunInput(input gateway.RunInput) agentruntime.PrepareInput {
 				continue
 			}
 			path := strings.TrimSpace(part.Media.URI)
-			if path == "" {
+			assetID := strings.TrimSpace(part.Media.AssetID)
+			if path == "" && assetID == "" {
 				continue
 			}
 			images = append(images, agentruntime.UserImageInput{
 				Path:     path,
+				AssetID:  assetID,
 				MimeType: strings.TrimSpace(part.Media.MimeType),
 			})
 		}
@@ -1829,6 +1975,7 @@ func convertSessionMessages(messages []providertypes.Message) []gateway.SessionM
 		convertedMessage := gateway.SessionMessage{
 			Role:       strings.TrimSpace(message.Role),
 			Content:    renderSessionMessageContent(message.Parts),
+			Parts:      convertProviderContentParts(message.Parts),
 			ToolCallID: strings.TrimSpace(message.ToolCallID),
 			IsError:    message.IsError,
 		}
@@ -1847,18 +1994,116 @@ func convertSessionMessages(messages []providertypes.Message) []gateway.SessionM
 	return converted
 }
 
+// convertProviderContentParts 将 provider 通用内容分片转换为 Gateway 会话快照分片。
+func convertProviderContentParts(parts []providertypes.ContentPart) []gateway.InputPart {
+	if len(parts) == 0 {
+		return nil
+	}
+	converted := make([]gateway.InputPart, 0, len(parts))
+	for _, part := range parts {
+		switch part.Kind {
+		case providertypes.ContentPartText:
+			if text := strings.TrimSpace(part.Text); text != "" {
+				converted = append(converted, gateway.InputPart{
+					Type: gateway.InputPartTypeText,
+					Text: text,
+				})
+			}
+		case providertypes.ContentPartImage:
+			if part.Image == nil {
+				continue
+			}
+			switch part.Image.SourceType {
+			case providertypes.ImageSourceSessionAsset:
+				if part.Image.Asset == nil || strings.TrimSpace(part.Image.Asset.ID) == "" {
+					continue
+				}
+				converted = append(converted, gateway.InputPart{
+					Type: gateway.InputPartTypeImage,
+					Media: &gateway.Media{
+						AssetID:  strings.TrimSpace(part.Image.Asset.ID),
+						MimeType: strings.TrimSpace(part.Image.Asset.MimeType),
+					},
+				})
+			case providertypes.ImageSourceRemote:
+				if url := strings.TrimSpace(part.Image.URL); url != "" {
+					converted = append(converted, gateway.InputPart{
+						Type: gateway.InputPartTypeImage,
+						Media: &gateway.Media{
+							URI: url,
+						},
+					})
+				}
+			}
+		}
+	}
+	return converted
+}
+
+// convertRuntimePlanTodoItem 将 session 计划中的 legacy todo 项映射为 gateway 展示结构。
+func convertRuntimePlanTodoItem(item agentsession.TodoItem) gateway.PlanTodoItem {
+	required := false
+	if item.Required != nil {
+		required = *item.Required
+	}
+	return gateway.PlanTodoItem{
+		ID:            strings.TrimSpace(item.ID),
+		Content:       strings.TrimSpace(item.Content),
+		Status:        strings.TrimSpace(string(item.Status)),
+		Required:      required,
+		Artifacts:     append([]string(nil), item.Artifacts...),
+		FailureReason: strings.TrimSpace(item.FailureReason),
+		BlockedReason: strings.TrimSpace(string(item.BlockedReason)),
+		Revision:      item.Revision,
+	}
+}
+
+// convertRuntimePlanArtifact 将 runtime 当前计划快照映射为 gateway 公开契约。
+func convertRuntimePlanArtifact(plan *agentsession.PlanArtifact) *gateway.PlanArtifact {
+	if plan == nil {
+		return nil
+	}
+	converted := &gateway.PlanArtifact{
+		ID:       strings.TrimSpace(plan.ID),
+		Revision: plan.Revision,
+		Status:   strings.TrimSpace(string(plan.Status)),
+		Spec: gateway.PlanSpec{
+			Goal:          strings.TrimSpace(plan.Spec.Goal),
+			Steps:         append([]string(nil), plan.Spec.Steps...),
+			Constraints:   append([]string(nil), plan.Spec.Constraints...),
+			OpenQuestions: append([]string(nil), plan.Spec.OpenQuestions...),
+		},
+		Summary: gateway.PlanSummaryView{
+			Goal:          strings.TrimSpace(plan.Summary.Goal),
+			KeySteps:      append([]string(nil), plan.Summary.KeySteps...),
+			Constraints:   append([]string(nil), plan.Summary.Constraints...),
+			ActiveTodoIDs: append([]string(nil), plan.Summary.ActiveTodoIDs...),
+		},
+		CreatedAt: plan.CreatedAt,
+		UpdatedAt: plan.UpdatedAt,
+	}
+	if len(plan.Spec.Todos) > 0 {
+		converted.Spec.Todos = make([]gateway.PlanTodoItem, 0, len(plan.Spec.Todos))
+		for _, item := range plan.Spec.Todos {
+			converted.Spec.Todos = append(converted.Spec.Todos, convertRuntimePlanTodoItem(item))
+		}
+	}
+	return converted
+}
+
 // convertRuntimeSessionToGatewaySession 将 runtime 会话结构映射为 gateway 契约返回值。
 func convertRuntimeSessionToGatewaySession(session agentsession.Session) gateway.Session {
 	return gateway.Session{
-		ID:        strings.TrimSpace(session.ID),
-		Title:     strings.TrimSpace(session.Title),
-		CreatedAt: session.CreatedAt,
-		UpdatedAt: session.UpdatedAt,
-		Workdir:   strings.TrimSpace(session.Workdir),
-		Provider:  strings.TrimSpace(session.Provider),
-		Model:     strings.TrimSpace(session.Model),
-		AgentMode: strings.TrimSpace(string(session.AgentMode)),
-		Messages:  convertSessionMessages(session.Messages),
+		ID:          strings.TrimSpace(session.ID),
+		Title:       strings.TrimSpace(session.Title),
+		CreatedAt:   session.CreatedAt,
+		UpdatedAt:   session.UpdatedAt,
+		Workdir:     strings.TrimSpace(session.Workdir),
+		Provider:    strings.TrimSpace(session.Provider),
+		Model:       strings.TrimSpace(session.Model),
+		AgentMode:   strings.TrimSpace(string(session.AgentMode)),
+		CurrentPlan: convertRuntimePlanArtifact(session.CurrentPlan),
+		Messages:    convertSessionMessages(session.Messages),
 	}
 }
 
@@ -2446,6 +2691,7 @@ type manualModelPayload struct {
 }
 
 var _ gateway.RuntimePort = (*gatewayRuntimePortBridge)(nil)
+var _ gateway.SessionAssetPort = (*gatewayRuntimePortBridge)(nil)
 
 func (b *gatewayRuntimePortBridge) ListCheckpoints(ctx context.Context, input gateway.ListCheckpointsInput) ([]gateway.CheckpointEntry, error) {
 	cp, ok := b.runtime.(runtimeCheckpointer)

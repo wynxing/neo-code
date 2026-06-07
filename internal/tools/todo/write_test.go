@@ -228,9 +228,6 @@ func TestToolMetadataMethods(t *testing.T) {
 	if strings.TrimSpace(tool.Description()) == "" {
 		t.Fatalf("Description() should not be empty")
 	}
-	if tool.MicroCompactPolicy() != tools.MicroCompactPolicyCompact {
-		t.Fatalf("MicroCompactPolicy() should be compact")
-	}
 	schema := tool.Schema()
 	if schema["type"] != "object" {
 		t.Fatalf("Schema() type = %+v", schema["type"])

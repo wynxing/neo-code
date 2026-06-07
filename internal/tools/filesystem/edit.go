@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"neo-code/internal/tools"
 	"os"
 	"strings"
 
 	"neo-code/internal/security"
-	"neo-code/internal/tools"
 )
 
 type EditTool struct {
@@ -53,11 +53,6 @@ func (t *EditTool) Schema() map[string]any {
 		},
 		"required": []string{"path", "search_string", "replace_string"},
 	}
-}
-
-// MicroCompactPolicy 声明编辑工具的历史结果默认参与 micro compact 清理。
-func (t *EditTool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyCompact
 }
 
 func (t *EditTool) Execute(ctx context.Context, input tools.ToolCallInput) (tools.ToolResult, error) {

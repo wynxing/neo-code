@@ -19,10 +19,8 @@ context:
   compact:
     manual_strategy: keep_recent
     manual_keep_recent_messages: 10
-    micro_compact_retained_tool_spans: 6
     read_time_max_message_spans: 24
     max_summary_chars: 1200
-    micro_compact_disabled: false
   budget:
     prompt_budget: 0
     reserve_tokens: 13000
@@ -38,12 +36,8 @@ context:
   在 `keep_recent` 模式下保留的最近消息数，并按 tool call / tool result 的原子块整体保留。
 - `read_time_max_message_spans`
   控制 `context.Builder` 读时 trim 可保留的 message span 上限。
-- `micro_compact_retained_tool_spans`
-  控制 read-time micro compact 默认保留原始内容的最近可压缩工具块数量。
 - `max_summary_chars`
   控制 compact summary 的最大字符数。
-- `micro_compact_disabled`
-  控制是否关闭默认启用的 read-time micro compact。
 
 ### `context.budget`
 

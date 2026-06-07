@@ -782,7 +782,6 @@ type stubTool struct {
 	content   string
 	isError   bool
 	err       error
-	policy    tools.MicroCompactPolicy
 	callCount int
 	lastInput tools.ToolCallInput
 	executeFn func(ctx context.Context, input tools.ToolCallInput) (tools.ToolResult, error)
@@ -798,10 +797,6 @@ func (t *stubTool) Description() string {
 
 func (t *stubTool) Schema() map[string]any {
 	return map[string]any{"type": "object"}
-}
-
-func (t *stubTool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return t.policy
 }
 
 func (t *stubTool) Execute(ctx context.Context, input tools.ToolCallInput) (tools.ToolResult, error) {
@@ -850,7 +845,6 @@ type stubToolManager struct {
 	result       tools.ToolResult
 	err          error
 	listErr      error
-	policies     map[string]tools.MicroCompactPolicy
 	listCalls    int
 	executeCalls int
 	lastInput    tools.ToolCallInput
@@ -874,19 +868,6 @@ func (m *stubToolManager) ListAvailableSpecs(ctx context.Context, input tools.Sp
 		return nil, m.listErr
 	}
 	return append([]providertypes.ToolSpec(nil), m.specs...), nil
-}
-
-func (m *stubToolManager) MicroCompactPolicy(name string) tools.MicroCompactPolicy {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if policy, ok := m.policies[name]; ok {
-		return policy
-	}
-	return tools.MicroCompactPolicyCompact
-}
-
-func (m *stubToolManager) MicroCompactSummarizer(name string) tools.ContentSummarizer {
-	return nil
 }
 
 func (m *stubToolManager) Execute(ctx context.Context, input tools.ToolCallInput) (tools.ToolResult, error) {
@@ -1622,9 +1603,6 @@ func TestServiceRunDelegatesToContextBuilder(t *testing.T) {
 	if builder.lastInput.Metadata.Model == "" {
 		t.Fatalf("expected model to be forwarded to builder metadata")
 	}
-	if builder.lastInput.Compact.DisableMicroCompact {
-		t.Fatalf("expected micro compact to stay enabled by default")
-	}
 	if builder.lastInput.TaskState.Goal != "Finish task state rollout" {
 		t.Fatalf("expected session task state to be forwarded to builder, got %+v", builder.lastInput.TaskState)
 	}
@@ -1716,47 +1694,6 @@ func TestServiceRunUsesSessionSelectionForMetadataAndBudget(t *testing.T) {
 	}
 }
 
-func TestServiceRunCanDisableMicroCompactViaConfig(t *testing.T) {
-	t.Parallel()
-
-	manager := newRuntimeConfigManager(t)
-	if err := manager.Update(context.Background(), func(cfg *config.Config) error {
-		cfg.Context.Compact.MicroCompactDisabled = true
-		return nil
-	}); err != nil {
-		t.Fatalf("update config: %v", err)
-	}
-
-	store := newMemoryStore()
-	registry := tools.NewRegistry()
-	registry.Register(&stubTool{name: "filesystem_read_file", content: "default"})
-
-	builder := &stubContextBuilder{
-		buildFn: func(ctx context.Context, input agentcontext.BuildInput) (agentcontext.BuildResult, error) {
-			return agentcontext.BuildResult{
-				SystemPrompt: "delegated prompt",
-				Messages:     append([]providertypes.Message(nil), input.Messages...),
-			}, nil
-		},
-	}
-
-	scripted := &scriptedProvider{
-		responses: []scriptedResponse{{
-			Message:      providertypes.Message{Role: providertypes.RoleAssistant, Parts: []providertypes.ContentPart{providertypes.NewTextPart("done")}},
-			FinishReason: "stop",
-		}},
-	}
-
-	service := NewWithFactory(manager, registry, store, &scriptedProviderFactory{provider: scripted}, builder)
-	if err := service.Run(context.Background(), UserInput{RunID: "run-disable-micro-compact", Parts: []providertypes.ContentPart{providertypes.NewTextPart("hello")}}); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if !builder.lastInput.Compact.DisableMicroCompact {
-		t.Fatalf("expected config to disable micro compact in build input")
-	}
-}
-
 func TestServiceRunPersistsSessionProviderAndModel(t *testing.T) {
 	t.Parallel()
 
@@ -1783,131 +1720,6 @@ func TestServiceRunPersistsSessionProviderAndModel(t *testing.T) {
 	}
 	if session.Model != cfg.CurrentModel {
 		t.Fatalf("expected session model %q, got %q", cfg.CurrentModel, session.Model)
-	}
-}
-
-func TestServiceRunDefaultBuilderUsesToolManagerMicroCompactPolicies(t *testing.T) {
-	t.Parallel()
-
-	manager := newRuntimeConfigManager(t)
-	store := newMemoryStore()
-	registry := tools.NewRegistry()
-	registry.Register(&stubTool{name: "preserve_tool", content: "default", policy: tools.MicroCompactPolicyPreserveHistory})
-	registry.Register(&stubTool{name: "bash", content: "default"})
-	registry.Register(&stubTool{name: "webfetch", content: "default"})
-
-	session := agentsession.New("preserve history")
-	session.ID = "session-preserve-history"
-	session.Messages = []providertypes.Message{
-		{Role: providertypes.RoleUser, Parts: []providertypes.ContentPart{providertypes.NewTextPart("older user")}},
-		{
-			Role: providertypes.RoleAssistant,
-			ToolCalls: []providertypes.ToolCall{
-				{ID: "call-1", Name: "preserve_tool", Arguments: "{}"},
-			},
-		},
-		{Role: providertypes.RoleTool, ToolCallID: "call-1", Parts: []providertypes.ContentPart{providertypes.NewTextPart("preserved result")}},
-		{
-			Role: providertypes.RoleAssistant,
-			ToolCalls: []providertypes.ToolCall{
-				{ID: "call-2", Name: "bash", Arguments: "{}"},
-			},
-		},
-		{Role: providertypes.RoleTool, ToolCallID: "call-2", Parts: []providertypes.ContentPart{providertypes.NewTextPart("recent bash result")}},
-		{
-			Role: providertypes.RoleAssistant,
-			ToolCalls: []providertypes.ToolCall{
-				{ID: "call-3", Name: "webfetch", Arguments: "{}"},
-			},
-		},
-		{Role: providertypes.RoleTool, ToolCallID: "call-3", Parts: []providertypes.ContentPart{providertypes.NewTextPart("latest webfetch result")}},
-	}
-	store.sessions[session.ID] = cloneSession(session)
-
-	scripted := &scriptedProvider{
-		responses: []scriptedResponse{{
-			Message:      providertypes.Message{Role: providertypes.RoleAssistant, Parts: []providertypes.ContentPart{providertypes.NewTextPart("done")}},
-			FinishReason: "stop",
-		}},
-	}
-
-	service := NewWithFactory(manager, registry, store, &scriptedProviderFactory{provider: scripted}, nil)
-	if err := service.Run(context.Background(), UserInput{
-		SessionID: session.ID,
-		RunID:     "run-preserve-history-policy",
-		Parts:     []providertypes.ContentPart{providertypes.NewTextPart("latest explicit instruction")},
-	}); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if len(scripted.requests) != 1 {
-		t.Fatalf("expected 1 provider request, got %d", len(scripted.requests))
-	}
-	if got := renderPartsForTest(scripted.requests[0].Messages[2].Parts); got != "preserved result" {
-		t.Fatalf("expected preserved tool result to remain visible, got %q", got)
-	}
-}
-
-func TestServiceRunDefaultBuilderUsesGenericToolManagerMicroCompactPolicies(t *testing.T) {
-	t.Parallel()
-
-	manager := newRuntimeConfigManager(t)
-	store := newMemoryStore()
-	toolManager := &stubToolManager{
-		policies: map[string]tools.MicroCompactPolicy{
-			"preserve_tool": tools.MicroCompactPolicyPreserveHistory,
-		},
-	}
-
-	session := agentsession.New("preserve history by manager")
-	session.ID = "session-preserve-history-manager"
-	session.Messages = []providertypes.Message{
-		{Role: providertypes.RoleUser, Parts: []providertypes.ContentPart{providertypes.NewTextPart("older user")}},
-		{
-			Role: providertypes.RoleAssistant,
-			ToolCalls: []providertypes.ToolCall{
-				{ID: "call-1", Name: "preserve_tool", Arguments: "{}"},
-			},
-		},
-		{Role: providertypes.RoleTool, ToolCallID: "call-1", Parts: []providertypes.ContentPart{providertypes.NewTextPart("preserved result")}},
-		{
-			Role: providertypes.RoleAssistant,
-			ToolCalls: []providertypes.ToolCall{
-				{ID: "call-2", Name: "bash", Arguments: "{}"},
-			},
-		},
-		{Role: providertypes.RoleTool, ToolCallID: "call-2", Parts: []providertypes.ContentPart{providertypes.NewTextPart("recent bash result")}},
-		{
-			Role: providertypes.RoleAssistant,
-			ToolCalls: []providertypes.ToolCall{
-				{ID: "call-3", Name: "webfetch", Arguments: "{}"},
-			},
-		},
-		{Role: providertypes.RoleTool, ToolCallID: "call-3", Parts: []providertypes.ContentPart{providertypes.NewTextPart("latest webfetch result")}},
-	}
-	store.sessions[session.ID] = cloneSession(session)
-
-	scripted := &scriptedProvider{
-		responses: []scriptedResponse{{
-			Message:      providertypes.Message{Role: providertypes.RoleAssistant, Parts: []providertypes.ContentPart{providertypes.NewTextPart("done")}},
-			FinishReason: "stop",
-		}},
-	}
-
-	service := NewWithFactory(manager, toolManager, store, &scriptedProviderFactory{provider: scripted}, &stubContextBuilder{})
-	if err := service.Run(context.Background(), UserInput{
-		SessionID: session.ID,
-		RunID:     "run-preserve-history-generic-manager",
-		Parts:     []providertypes.ContentPart{providertypes.NewTextPart("latest explicit instruction")},
-	}); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if len(scripted.requests) != 1 {
-		t.Fatalf("expected 1 provider request, got %d", len(scripted.requests))
-	}
-	if got := renderPartsForTest(scripted.requests[0].Messages[2].Parts); got != "preserved result" {
-		t.Fatalf("expected preserved tool result to remain visible, got %q", got)
 	}
 }
 
@@ -3943,6 +3755,7 @@ func TestServiceRunPlanModePersistsDraftPlan(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
+	events := collectRuntimeEvents(service.Events())
 
 	saved := onlySession(t, store)
 	if saved.AgentMode != agentsession.AgentModePlan {
@@ -3978,9 +3791,26 @@ func TestServiceRunPlanModePersistsDraftPlan(t *testing.T) {
 	if got := renderPartsForTest(saved.Messages[2].Parts); !strings.Contains(got, "目标") {
 		t.Fatalf("expected rendered plan content, got %q", got)
 	}
+	var planEvent RuntimeEvent
+	for _, event := range events {
+		if event.Type == EventPlanUpdated {
+			planEvent = event
+			break
+		}
+	}
+	if planEvent.Type != EventPlanUpdated {
+		t.Fatalf("expected %s event, got events %+v", EventPlanUpdated, eventTypes(events))
+	}
+	payload, ok := planEvent.Payload.(PlanUpdatedPayload)
+	if !ok {
+		t.Fatalf("plan event payload = %T, want PlanUpdatedPayload", planEvent.Payload)
+	}
+	if payload.CurrentPlan == nil || payload.CurrentPlan.Spec.Goal != "为 runtime 引入 plan/build 模式" {
+		t.Fatalf("unexpected plan event payload: %+v", payload.CurrentPlan)
+	}
 }
 
-func TestServiceRunPlanModeShowsExplanationTextOutsidePlanningJSON(t *testing.T) {
+func TestServiceRunPlanModePersistsCanonicalMarkdownInsteadOfPlanningJSON(t *testing.T) {
 	t.Parallel()
 
 	manager := newRuntimeConfigManager(t)
@@ -4032,8 +3862,12 @@ func TestServiceRunPlanModeShowsExplanationTextOutsidePlanningJSON(t *testing.T)
 	if strings.Contains(got, "\"plan_spec\"") {
 		t.Fatalf("expected persisted assistant text to strip planning JSON, got %q", got)
 	}
-	if !strings.Contains(got, "先确认范围") || !strings.Contains(got, "继续执行") {
-		t.Fatalf("expected prose explanation to be preserved, got %q", got)
+	if strings.Contains(got, "先确认范围") || strings.Contains(got, "继续执行") {
+		t.Fatalf("expected model prose to be replaced by canonical markdown, got %q", got)
+	}
+	if !strings.Contains(got, "### 目标") || !strings.Contains(got, "Preserve prose around planning JSON") ||
+		!strings.Contains(got, "### 实施步骤") || !strings.Contains(got, "- persist plan") {
+		t.Fatalf("expected canonical markdown plan, got %q", got)
 	}
 }
 
@@ -4926,8 +4760,278 @@ func TestServiceRunCompactedSessionRequestsRestoreAlignment(t *testing.T) {
 	}
 }
 
+func TestRunRejectsImageInputForUnsupportedModelBeforeProviderBuild(t *testing.T) {
+	manager := newRuntimeConfigManager(t)
+	configureCurrentModelImageInputForTest(t, manager, providertypes.ModelCapabilityStateUnsupported)
+
+	store := newMemoryStore()
+	factory := &scriptedProviderFactory{provider: &scriptedProvider{}}
+	service := NewWithFactory(manager, tools.NewRegistry(), store, factory, &stubContextBuilder{})
+
+	err := service.Run(context.Background(), UserInput{
+		RunID: "run-image-unsupported",
+		Parts: []providertypes.ContentPart{
+			providertypes.NewTextPart("look at this"),
+			providertypes.NewSessionAssetImagePart("asset-1", "image/png"),
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not support image input") {
+		t.Fatalf("Run() error = %v, want image input unsupported", err)
+	}
+	if factory.calls != 0 {
+		t.Fatalf("provider build calls = %d, want 0", factory.calls)
+	}
+}
+
+func TestRunProjectsHistoricalImagesForUnsupportedModelRequest(t *testing.T) {
+	manager := newRuntimeConfigManager(t)
+	configureCurrentModelImageInputForTest(t, manager, providertypes.ModelCapabilityStateUnsupported)
+
+	store := newMemoryStore()
+	seed := agentsession.New("image history")
+	seed.ID = "session-image-history"
+	seed.Messages = []providertypes.Message{
+		{
+			Role: providertypes.RoleUser,
+			Parts: []providertypes.ContentPart{
+				providertypes.NewTextPart("old image"),
+				providertypes.NewSessionAssetImagePart("asset-old", "image/png"),
+			},
+		},
+		{Role: providertypes.RoleAssistant, Parts: []providertypes.ContentPart{providertypes.NewTextPart("图片已收到")}},
+	}
+	store.sessions[seed.ID] = cloneSession(seed)
+
+	scripted := &scriptedProvider{
+		streams: [][]providertypes.StreamEvent{{
+			providertypes.NewTextDeltaStreamEvent("done"),
+			providertypes.NewMessageDoneStreamEvent("", nil),
+		}},
+	}
+	service := NewWithFactory(manager, tools.NewRegistry(), store, &scriptedProviderFactory{provider: scripted}, &stubContextBuilder{})
+
+	if err := service.Run(context.Background(), UserInput{
+		SessionID: seed.ID,
+		RunID:     "run-project-historical-image",
+		Parts:     []providertypes.ContentPart{providertypes.NewTextPart("continue without image")},
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(scripted.requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(scripted.requests))
+	}
+	if messagesContainImages(scripted.requests[0].Messages) {
+		t.Fatalf("provider request still contains image: %+v", scripted.requests[0].Messages)
+	}
+	if got := renderPartsForTest(scripted.requests[0].Messages[0].Parts); !strings.Contains(got, historicalImageOmittedForModel) {
+		t.Fatalf("projected historical image text = %q, want placeholder", got)
+	}
+
+	saved, err := store.Load(context.Background(), seed.ID)
+	if err != nil {
+		t.Fatalf("load saved session: %v", err)
+	}
+	if !messagesContainImages(saved.Messages[:1]) {
+		t.Fatalf("saved historical message lost image: %+v", saved.Messages[:1])
+	}
+}
+
+func TestProjectImagesForModelRequestCapabilityStates(t *testing.T) {
+	imageMessages := []providertypes.Message{{
+		Role:  providertypes.RoleUser,
+		Parts: []providertypes.ContentPart{providertypes.NewSessionAssetImagePart("asset-1", "image/png")},
+	}}
+	currentText := []providertypes.ContentPart{providertypes.NewTextPart("hello")}
+	currentImage := []providertypes.ContentPart{providertypes.NewSessionAssetImagePart("asset-new", "image/png")}
+
+	tests := []struct {
+		name        string
+		model       string
+		models      []providertypes.ModelDescriptor
+		current     []providertypes.ContentPart
+		wantErr     bool
+		wantImage   bool
+		wantOmitted bool
+	}{
+		{
+			name:  "unsupported historical image is omitted",
+			model: "model-a",
+			models: []providertypes.ModelDescriptor{{ID: "model-a", CapabilityHints: providertypes.ModelCapabilityHints{
+				ImageInput: providertypes.ModelCapabilityStateUnsupported,
+			}}},
+			current:     currentText,
+			wantOmitted: true,
+		},
+		{
+			name:  "unknown historical image is omitted",
+			model: "model-a",
+			models: []providertypes.ModelDescriptor{{ID: "model-a", CapabilityHints: providertypes.ModelCapabilityHints{
+				ImageInput: providertypes.ModelCapabilityStateUnknown,
+			}}},
+			current:     currentText,
+			wantOmitted: true,
+		},
+		{
+			name:        "missing model historical image is omitted",
+			model:       "missing",
+			models:      []providertypes.ModelDescriptor{{ID: "other"}},
+			current:     currentText,
+			wantOmitted: true,
+		},
+		{
+			name:  "supported historical image is retained",
+			model: "model-a",
+			models: []providertypes.ModelDescriptor{{ID: "model-a", CapabilityHints: providertypes.ModelCapabilityHints{
+				ImageInput: providertypes.ModelCapabilityStateSupported,
+			}}},
+			current:   currentText,
+			wantImage: true,
+		},
+		{
+			name:  "unsupported current image rejects",
+			model: "model-a",
+			models: []providertypes.ModelDescriptor{{ID: "model-a", CapabilityHints: providertypes.ModelCapabilityHints{
+				ImageInput: providertypes.ModelCapabilityStateUnsupported,
+			}}},
+			current: currentImage,
+			wantErr: true,
+		},
+		{
+			name:  "unknown current image is retained",
+			model: "model-a",
+			models: []providertypes.ModelDescriptor{{ID: "model-a", CapabilityHints: providertypes.ModelCapabilityHints{
+				ImageInput: providertypes.ModelCapabilityStateUnknown,
+			}}},
+			current:   currentImage,
+			wantImage: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projected, err := projectImagesForModelRequest(tt.model, tt.models, imageMessages, tt.current)
+			if tt.wantErr && err == nil {
+				t.Fatal("expected unsupported image input error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.wantErr {
+				return
+			}
+			if got := messagesContainImages(projected); got != tt.wantImage {
+				t.Fatalf("messagesContainImages(projected) = %t, want %t; projected=%+v", got, tt.wantImage, projected)
+			}
+			if got := strings.Contains(renderPartsForTest(projected[0].Parts), historicalImageOmittedForModel); got != tt.wantOmitted {
+				t.Fatalf("placeholder present = %t, want %t; projected=%+v", got, tt.wantOmitted, projected)
+			}
+			if !messagesContainImages(imageMessages) {
+				t.Fatalf("original messages were mutated: %+v", imageMessages)
+			}
+		})
+	}
+}
+
+// TestProjectImagesForModelRequestEmptyMessages 验证空消息列表不会 panic 并正确返回空结果。
+func TestProjectImagesForModelRequestEmptyMessages(t *testing.T) {
+	t.Parallel()
+	models := []providertypes.ModelDescriptor{{ID: "model-a", CapabilityHints: providertypes.ModelCapabilityHints{
+		ImageInput: providertypes.ModelCapabilityStateUnsupported,
+	}}}
+	projected, err := projectImagesForModelRequest("model-a", models, nil, []providertypes.ContentPart{providertypes.NewTextPart("hello")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(projected) != 0 {
+		t.Fatalf("expected empty projected messages, got %d", len(projected))
+	}
+}
+
+// TestProjectImagesForModelRequestMixedMessages 验证混合图片和文本的消息中只有图片被投影降级。
+func TestProjectImagesForModelRequestMixedMessages(t *testing.T) {
+	t.Parallel()
+	messages := []providertypes.Message{
+		{
+			Role:  providertypes.RoleUser,
+			Parts: []providertypes.ContentPart{providertypes.NewTextPart("text before image")},
+		},
+		{
+			Role:  providertypes.RoleUser,
+			Parts: []providertypes.ContentPart{providertypes.NewSessionAssetImagePart("asset-1", "image/png")},
+		},
+		{
+			Role:  providertypes.RoleAssistant,
+			Parts: []providertypes.ContentPart{providertypes.NewTextPart("response")},
+		},
+	}
+	models := []providertypes.ModelDescriptor{{ID: "model-a", CapabilityHints: providertypes.ModelCapabilityHints{
+		ImageInput: providertypes.ModelCapabilityStateUnsupported,
+	}}}
+	projected, err := projectImagesForModelRequest("model-a", models, messages, []providertypes.ContentPart{providertypes.NewTextPart("current text")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(projected) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(projected))
+	}
+	// 第一条消息应保持纯文本不变
+	if projected[0].Parts[0].Kind != providertypes.ContentPartText {
+		t.Fatalf("first message should be text, got %s", projected[0].Parts[0].Kind)
+	}
+	// 第二条消息中的图片应被替换为占位文本
+	if messagesContainImages(projected) {
+		t.Fatal("expected no images in projected messages for unsupported model")
+	}
+	if !strings.Contains(renderPartsForTest(projected[1].Parts), historicalImageOmittedForModel) {
+		t.Fatal("expected historical image omitted placeholder in second message")
+	}
+	// 第三条消息应保持不变
+	if projected[2].Parts[0].Kind != providertypes.ContentPartText {
+		t.Fatalf("third message should be text, got %s", projected[2].Parts[0].Kind)
+	}
+	// 原始消息不应被修改
+	if !messagesContainImages(messages) {
+		t.Fatal("original messages should still contain images")
+	}
+}
+
 func newRuntimeConfigManager(t *testing.T) *config.Manager {
 	return newRuntimeConfigManagerWithProviderEnvs(t, nil)
+}
+
+func configureCurrentModelImageInputForTest(
+	t *testing.T,
+	manager *config.Manager,
+	state providertypes.ModelCapabilityState,
+) {
+	t.Helper()
+	providerName := config.OpenAIName
+	modelID := "gpt-4o"
+	apiKeyEnv := config.OpenAIDefaultAPIKeyEnv
+	if state == providertypes.ModelCapabilityStateUnsupported {
+		providerName = config.QiniuName
+		modelID = config.QiniuDefaultModel
+		apiKeyEnv = config.QiniuDefaultAPIKeyEnv
+	}
+	t.Setenv(apiKeyEnv, "test-key")
+	if err := manager.Update(context.Background(), func(cfg *config.Config) error {
+		providerIndex := -1
+		for index := range cfg.Providers {
+			if cfg.Providers[index].Name == providerName {
+				providerIndex = index
+				break
+			}
+		}
+		if providerIndex < 0 {
+			return fmt.Errorf("test config has no provider %q", providerName)
+		}
+		cfg.SelectedProvider = providerName
+		cfg.CurrentModel = modelID
+		cfg.Providers[providerIndex].Model = modelID
+		return nil
+	}); err != nil {
+		t.Fatalf("configure image input capability: %v", err)
+	}
 }
 
 func newRuntimeConfigManagerWithProviderEnvs(t *testing.T, providerEnvs map[string]string) *config.Manager {
@@ -6349,6 +6453,90 @@ func TestServiceRunAllowsAfterProactiveCompactWhenEstimateAdvisory(t *testing.T)
 	}
 	if stopPayload.Reason != controlplane.StopReasonAccepted {
 		t.Fatalf("expected stop reason %q, got %q", controlplane.StopReasonAccepted, stopPayload.Reason)
+	}
+}
+
+func TestServiceRunAllowsImageRequestWithinProjectedBudget(t *testing.T) {
+	t.Parallel()
+
+	manager := newRuntimeConfigManager(t)
+	if err := manager.Update(context.Background(), func(cfg *config.Config) error {
+		cfg.Context.Budget.PromptBudget = 5000
+		cfg.Context.Budget.FallbackPromptBudget = 5000
+		return nil
+	}); err != nil {
+		t.Fatalf("update config: %v", err)
+	}
+
+	store := newMemoryStore()
+	registry := tools.NewRegistry()
+	scripted := &scriptedProvider{
+		estimateFn: func(ctx context.Context, req providertypes.GenerateRequest) (providertypes.BudgetEstimate, error) {
+			_ = ctx
+			tokens, err := provider.EstimateProjectedInputTokens(req, provider.ResolveRequestModel(req, "gpt-4.1"))
+			if err != nil {
+				return providertypes.BudgetEstimate{}, err
+			}
+			return providertypes.BudgetEstimate{
+				EstimatedInputTokens: tokens,
+				EstimateSource:       provider.EstimateSourceLocal,
+				GatePolicy:           provider.EstimateGateAdvisory,
+			}, nil
+		},
+		responses: []scriptedResponse{
+			{
+				Message: providertypes.Message{
+					Role:  providertypes.RoleAssistant,
+					Parts: []providertypes.ContentPart{providertypes.NewTextPart("图片已收到")},
+				},
+				FinishReason: "stop",
+			},
+		},
+	}
+
+	service := NewWithFactory(manager, registry, store, &scriptedProviderFactory{provider: scripted}, &stubContextBuilder{})
+	service.compactRunner = &stubCompactRunner{}
+
+	if err := service.Run(context.Background(), UserInput{
+		RunID: "run-budget-image-allow",
+		Parts: []providertypes.ContentPart{
+			providertypes.NewTextPart("describe"),
+			providertypes.NewSessionAssetImagePart("asset-1", "image/png"),
+		},
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if scripted.callCount != 1 {
+		t.Fatalf("expected provider Generate to be called once, got %d", scripted.callCount)
+	}
+	if compactRunner := service.compactRunner.(*stubCompactRunner); len(compactRunner.calls) != 0 {
+		t.Fatalf("expected no proactive compact for projected image estimate, got %d calls", len(compactRunner.calls))
+	}
+
+	events := collectRuntimeEvents(service.Events())
+	var budgetPayload *BudgetCheckedPayload
+	for _, event := range events {
+		if event.Type != EventBudgetChecked {
+			continue
+		}
+		payload, ok := event.Payload.(BudgetCheckedPayload)
+		if !ok {
+			t.Fatalf("expected BudgetCheckedPayload, got %T", event.Payload)
+		}
+		budgetPayload = &payload
+		break
+	}
+	if budgetPayload == nil {
+		t.Fatalf("expected budget_checked event, got %+v", events)
+	}
+	if budgetPayload.Action != string(controlplane.TurnBudgetActionAllow) ||
+		budgetPayload.Reason != controlplane.BudgetDecisionReasonWithinBudget {
+		t.Fatalf("unexpected budget decision: %+v", budgetPayload)
+	}
+	if budgetPayload.EstimatedInputTokens <= provider.DefaultImageInputTokenEstimate ||
+		budgetPayload.EstimatedInputTokens >= budgetPayload.PromptBudget {
+		t.Fatalf("unexpected projected image estimate: %+v", budgetPayload)
 	}
 }
 

@@ -32,9 +32,6 @@ func TestReadToolMetadata(t *testing.T) {
 	if _, hasPath := props["path"]; !hasPath {
 		t.Fatalf("Schema should have path property")
 	}
-	if tool.MicroCompactPolicy() != tools.MicroCompactPolicyPreserveHistory {
-		t.Fatalf("MicroCompactPolicy() = %v, want PreserveHistory", tool.MicroCompactPolicy())
-	}
 }
 
 func TestReadToolInvalidJSON(t *testing.T) {

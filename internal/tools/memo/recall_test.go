@@ -87,9 +87,6 @@ func TestRecallToolDescriptionAndSchema(t *testing.T) {
 	if schema == nil {
 		t.Fatal("Schema() should not be nil")
 	}
-	if tool.MicroCompactPolicy() != tools.MicroCompactPolicyPreserveHistory {
-		t.Fatalf("MicroCompactPolicy() = %v, want PreserveHistory", tool.MicroCompactPolicy())
-	}
 }
 
 func TestRecallToolExecuteWithScopeFilter(t *testing.T) {

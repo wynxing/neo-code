@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,6 +91,12 @@ type runtimeStub struct {
 	checkpointDiffErr     error
 }
 
+type runtimePlanApproverStub struct {
+	*runtimeStub
+	approveInput agentruntime.ApproveCurrentPlanInput
+	approveErr   error
+}
+
 const testBridgeSubjectID = bridgeLocalSubjectID
 
 func (s *runtimeStub) Submit(_ context.Context, input agentruntime.PrepareInput) error {
@@ -130,6 +138,14 @@ func (s *runtimeStub) ExecuteSystemTool(_ context.Context, input agentruntime.Sy
 func (s *runtimeStub) ResolvePermission(_ context.Context, input agentruntime.PermissionResolutionInput) error {
 	s.permissionInput = input
 	return s.permissionErr
+}
+
+func (s *runtimePlanApproverStub) ApproveCurrentPlan(
+	_ context.Context,
+	input agentruntime.ApproveCurrentPlanInput,
+) error {
+	s.approveInput = input
+	return s.approveErr
 }
 
 func (s *runtimeStub) ResolveUserQuestion(_ context.Context, input agentruntime.UserQuestionResolutionInput) error {
@@ -1075,6 +1091,101 @@ func TestGatewayRuntimePortBridgeListSessionTodosAndSnapshot(t *testing.T) {
 	})
 }
 
+func TestGatewayRuntimePortBridgeApprovePlan(t *testing.T) {
+	runtimeSvc := &runtimePlanApproverStub{
+		runtimeStub: &runtimeStub{eventsCh: make(chan agentruntime.RuntimeEvent, 1)},
+	}
+	bridge, err := newGatewayRuntimePortBridge(context.Background(), runtimeSvc, testSessionStore)
+	if err != nil {
+		t.Fatalf("new bridge: %v", err)
+	}
+	t.Cleanup(func() { _ = bridge.Close() })
+
+	result, err := bridge.ApprovePlan(context.Background(), gateway.ApprovePlanInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: " session-1 ",
+		PlanID:    " plan-1 ",
+		Revision:  3,
+	})
+	if err != nil {
+		t.Fatalf("approve_plan: %v", err)
+	}
+	if runtimeSvc.approveInput.SessionID != "session-1" || runtimeSvc.approveInput.PlanID != "plan-1" || runtimeSvc.approveInput.Revision != 3 {
+		t.Fatalf("approve input = %#v, want trimmed session/plan revision", runtimeSvc.approveInput)
+	}
+	if result.PlanID != "plan-1" || result.Revision != 3 || result.Status != "approved" {
+		t.Fatalf("approve result = %#v, want approved plan-1 revision 3", result)
+	}
+}
+
+func TestGatewayRuntimePortBridgeApprovePlanUnsupportedRuntime(t *testing.T) {
+	bridge, err := newGatewayRuntimePortBridge(
+		context.Background(),
+		&runtimeStub{eventsCh: make(chan agentruntime.RuntimeEvent, 1)},
+		testSessionStore,
+	)
+	if err != nil {
+		t.Fatalf("new bridge: %v", err)
+	}
+	t.Cleanup(func() { _ = bridge.Close() })
+
+	_, err = bridge.ApprovePlan(context.Background(), gateway.ApprovePlanInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: "session-1",
+		PlanID:    "plan-1",
+		Revision:  1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "runtime does not support plan approval") {
+		t.Fatalf("approve_plan unsupported error = %v", err)
+	}
+}
+
+func TestGatewayRuntimePortBridgeApprovePlanInvalidAction(t *testing.T) {
+	runtimeSvc := &runtimePlanApproverStub{
+		runtimeStub: &runtimeStub{eventsCh: make(chan agentruntime.RuntimeEvent, 1)},
+		approveErr:  agentruntime.ErrPlanApprovalRevisionMismatch,
+	}
+	bridge, err := newGatewayRuntimePortBridge(context.Background(), runtimeSvc, testSessionStore)
+	if err != nil {
+		t.Fatalf("new bridge: %v", err)
+	}
+	t.Cleanup(func() { _ = bridge.Close() })
+
+	_, err = bridge.ApprovePlan(context.Background(), gateway.ApprovePlanInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: "session-1",
+		PlanID:    "plan-1",
+		Revision:  1,
+	})
+	if !errors.Is(err, gateway.ErrRuntimeInvalidAction) {
+		t.Fatalf("approve_plan error = %v, want ErrRuntimeInvalidAction", err)
+	}
+}
+
+func TestGatewayRuntimePortBridgeApprovePlanAccessDenied(t *testing.T) {
+	runtimeSvc := &runtimePlanApproverStub{
+		runtimeStub: &runtimeStub{eventsCh: make(chan agentruntime.RuntimeEvent, 1)},
+	}
+	bridge, err := newGatewayRuntimePortBridge(context.Background(), runtimeSvc, testSessionStore)
+	if err != nil {
+		t.Fatalf("new bridge: %v", err)
+	}
+	t.Cleanup(func() { _ = bridge.Close() })
+
+	_, err = bridge.ApprovePlan(context.Background(), gateway.ApprovePlanInput{
+		SubjectID: "other-subject",
+		SessionID: "session-1",
+		PlanID:    "plan-1",
+		Revision:  1,
+	})
+	if !errors.Is(err, gateway.ErrRuntimeAccessDenied) {
+		t.Fatalf("approve_plan error = %v, want ErrRuntimeAccessDenied", err)
+	}
+	if runtimeSvc.approveInput.SessionID != "" {
+		t.Fatalf("runtime approve should not be called, input = %#v", runtimeSvc.approveInput)
+	}
+}
+
 func TestGatewayRuntimePortBridgeLoadSessionNotFoundBranches(t *testing.T) {
 	t.Parallel()
 
@@ -1441,6 +1552,7 @@ func TestConvertGatewayRunInputAndSessionHelpers(t *testing.T) {
 			{Type: gateway.InputPartTypeImage, Media: nil},
 			{Type: gateway.InputPartTypeImage, Media: &gateway.Media{URI: "   "}},
 			{Type: gateway.InputPartTypeImage, Media: &gateway.Media{URI: " /tmp/a.png ", MimeType: " image/png "}},
+			{Type: gateway.InputPartTypeImage, Media: &gateway.Media{AssetID: " asset-1 ", MimeType: " image/webp "}},
 		},
 		Workdir: " /tmp/work ",
 	})
@@ -1450,8 +1562,14 @@ func TestConvertGatewayRunInputAndSessionHelpers(t *testing.T) {
 	if converted.Text != "base\ntext" {
 		t.Fatalf("text = %q, want %q", converted.Text, "base\ntext")
 	}
-	if len(converted.Images) != 1 || converted.Images[0].Path != "/tmp/a.png" {
-		t.Fatalf("images = %#v, want one valid image", converted.Images)
+	if len(converted.Images) != 2 {
+		t.Fatalf("images = %#v, want two valid images", converted.Images)
+	}
+	if converted.Images[0].Path != "/tmp/a.png" || converted.Images[0].MimeType != "image/png" {
+		t.Fatalf("local image = %#v, want normalized path/mime", converted.Images[0])
+	}
+	if converted.Images[1].AssetID != "asset-1" || converted.Images[1].MimeType != "image/webp" {
+		t.Fatalf("asset image = %#v, want normalized asset_id/mime", converted.Images[1])
 	}
 
 	if got := renderSessionMessageContent(nil); got != "" {
@@ -1468,6 +1586,205 @@ func TestConvertGatewayRunInputAndSessionHelpers(t *testing.T) {
 
 	if messages := convertSessionMessages(nil); messages != nil {
 		t.Fatalf("convert nil messages = %#v, want nil", messages)
+	}
+}
+
+func TestGatewayRuntimePortBridgeSessionAssets(t *testing.T) {
+	t.Parallel()
+
+	workdir := t.TempDir()
+	store := agentsession.NewSQLiteStore(t.TempDir(), workdir)
+	t.Cleanup(func() { _ = store.Close() })
+	session := agentsession.NewWithWorkdir("asset session", workdir)
+	if _, err := store.CreateSession(context.Background(), agentsession.CreateSessionInput{
+		ID:        session.ID,
+		Title:     session.Title,
+		CreatedAt: session.CreatedAt,
+		UpdatedAt: session.UpdatedAt,
+		Head:      session.HeadSnapshot(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	bridge, err := newGatewayRuntimePortBridge(
+		context.Background(),
+		&runtimeStub{eventsCh: make(chan agentruntime.RuntimeEvent, 1)},
+		store,
+	)
+	if err != nil {
+		t.Fatalf("new bridge: %v", err)
+	}
+	defer bridge.Close()
+
+	payload := []byte("image payload")
+	meta, err := bridge.SaveSessionAsset(context.Background(), gateway.SaveSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: " " + session.ID + " ",
+		Reader:    bytes.NewReader(payload),
+		MimeType:  " image/png ",
+	})
+	if err != nil {
+		t.Fatalf("SaveSessionAsset() error = %v", err)
+	}
+	if meta.SessionID != session.ID || meta.AssetID == "" || meta.MimeType != "image/png" || meta.Size != int64(len(payload)) {
+		t.Fatalf("unexpected saved meta: %+v", meta)
+	}
+
+	opened, err := bridge.OpenSessionAsset(context.Background(), gateway.OpenSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: session.ID,
+		AssetID:   " " + meta.AssetID + " ",
+	})
+	if err != nil {
+		t.Fatalf("OpenSessionAsset() error = %v", err)
+	}
+	got, err := io.ReadAll(opened.Reader)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if string(got) != string(payload) || opened.Meta.AssetID != meta.AssetID || opened.Meta.MimeType != "image/png" {
+		t.Fatalf("unexpected opened asset meta=%+v payload=%q", opened.Meta, string(got))
+	}
+	if err := opened.Reader.Close(); err != nil {
+		t.Fatalf("Close opened asset reader: %v", err)
+	}
+
+	if err := bridge.DeleteSessionAsset(context.Background(), gateway.DeleteSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: session.ID,
+		AssetID:   meta.AssetID,
+	}); err != nil {
+		t.Fatalf("DeleteSessionAsset() error = %v", err)
+	}
+	if err := bridge.DeleteSessionAsset(context.Background(), gateway.DeleteSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: session.ID,
+		AssetID:   meta.AssetID,
+	}); err != nil {
+		t.Fatalf("DeleteSessionAsset() should be idempotent, got %v", err)
+	}
+	if _, err := bridge.OpenSessionAsset(context.Background(), gateway.OpenSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: session.ID,
+		AssetID:   meta.AssetID,
+	}); !errors.Is(err, gateway.ErrRuntimeResourceNotFound) {
+		t.Fatalf("OpenSessionAsset() after delete error = %v, want resource not found", err)
+	}
+}
+
+func TestGatewayRuntimePortBridgeSessionAssetErrors(t *testing.T) {
+	t.Parallel()
+
+	bridge, err := newGatewayRuntimePortBridge(
+		context.Background(),
+		&runtimeStub{eventsCh: make(chan agentruntime.RuntimeEvent, 1)},
+		testSessionStore,
+	)
+	if err != nil {
+		t.Fatalf("new bridge: %v", err)
+	}
+	defer bridge.Close()
+
+	if _, err := bridge.SaveSessionAsset(context.Background(), gateway.SaveSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: "  ",
+		Reader:    strings.NewReader("x"),
+		MimeType:  "image/png",
+	}); err == nil {
+		t.Fatal("expected empty session id save error")
+	}
+	if _, err := bridge.OpenSessionAsset(context.Background(), gateway.OpenSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: "session-1",
+		AssetID:   "  ",
+	}); err == nil {
+		t.Fatal("expected empty asset id open error")
+	}
+	if _, err := bridge.SaveSessionAsset(context.Background(), gateway.SaveSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: "session-1",
+		Reader:    strings.NewReader("x"),
+		MimeType:  "image/png",
+	}); err == nil || !strings.Contains(err.Error(), "asset store is unavailable") {
+		t.Fatalf("expected unavailable asset store save error, got %v", err)
+	}
+	if err := bridge.DeleteSessionAsset(context.Background(), gateway.DeleteSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: "session-1",
+		AssetID:   "asset-1",
+	}); err == nil || !strings.Contains(err.Error(), "does not support delete") {
+		t.Fatalf("expected unavailable asset store delete error, got %v", err)
+	}
+	if _, err := bridge.OpenSessionAsset(context.Background(), gateway.OpenSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: "session-1",
+		AssetID:   "asset-1",
+	}); err == nil || !strings.Contains(err.Error(), "asset store is unavailable") {
+		t.Fatalf("expected unavailable asset store open error, got %v", err)
+	}
+}
+
+func TestGatewayRuntimePortBridgeSessionAssetSaveRequiresExistingSession(t *testing.T) {
+	t.Parallel()
+
+	store := agentsession.NewSQLiteStore(t.TempDir(), t.TempDir())
+	t.Cleanup(func() { _ = store.Close() })
+	bridge, err := newGatewayRuntimePortBridge(
+		context.Background(),
+		&runtimeStub{eventsCh: make(chan agentruntime.RuntimeEvent, 1)},
+		store,
+	)
+	if err != nil {
+		t.Fatalf("new bridge: %v", err)
+	}
+	defer bridge.Close()
+
+	_, err = bridge.SaveSessionAsset(context.Background(), gateway.SaveSessionAssetInput{
+		SubjectID: testBridgeSubjectID,
+		SessionID: "missing-session",
+		Reader:    strings.NewReader("x"),
+		MimeType:  "image/png",
+	})
+	if !errors.Is(err, gateway.ErrRuntimeResourceNotFound) {
+		t.Fatalf("SaveSessionAsset() missing session error = %v, want resource not found", err)
+	}
+}
+
+func TestConvertRuntimeSessionToGatewaySessionIncludesCurrentPlan(t *testing.T) {
+	required := true
+	session := agentsession.New("plan session")
+	session.AgentMode = agentsession.AgentModePlan
+	session.CurrentPlan = &agentsession.PlanArtifact{
+		ID:       "plan-1",
+		Revision: 2,
+		Status:   agentsession.PlanStatusDraft,
+		Spec: agentsession.PlanSpec{
+			Goal:          "修复 web plan 展示",
+			Steps:         []string{"发事件", "渲染卡片"},
+			Constraints:   []string{"不创建执行 todo"},
+			OpenQuestions: []string{"是否需要审批按钮"},
+			Todos: []agentsession.TodoItem{{
+				ID:       "todo-1",
+				Content:  "legacy todo",
+				Status:   agentsession.TodoStatusPending,
+				Required: &required,
+			}},
+		},
+		Summary: agentsession.SummaryView{
+			Goal:     "修复 web plan 展示",
+			KeySteps: []string{"发事件"},
+		},
+	}
+
+	converted := convertRuntimeSessionToGatewaySession(session)
+	if converted.CurrentPlan == nil {
+		t.Fatal("expected current_plan to be present")
+	}
+	if converted.CurrentPlan.ID != "plan-1" || converted.CurrentPlan.Spec.Goal != "修复 web plan 展示" {
+		t.Fatalf("unexpected current_plan: %+v", converted.CurrentPlan)
+	}
+	if len(converted.CurrentPlan.Spec.Todos) != 1 || !converted.CurrentPlan.Spec.Todos[0].Required {
+		t.Fatalf("unexpected plan todos: %+v", converted.CurrentPlan.Spec.Todos)
 	}
 }
 

@@ -11,6 +11,7 @@ export const Method = {
   Ping: "gateway.ping",
   BindStream: "gateway.bindStream",
   Run: "gateway.run",
+  CreateSession: "gateway.createSession",
   Cancel: "gateway.cancel",
   Compact: "gateway.compact",
   ListSessions: "gateway.listSessions",
@@ -21,6 +22,7 @@ export const Method = {
   UndoRestore: "checkpoint.undoRestore",
   CheckpointDiff: "checkpoint.diff",
   ResolvePermission: "gateway.resolvePermission",
+  ApprovePlan: "gateway.approvePlan",
   UserQuestionAnswer: "gateway.userQuestionAnswer",
   ExecuteSystemTool: "gateway.executeSystemTool",
   ActivateSessionSkill: "gateway.activateSessionSkill",
@@ -62,6 +64,7 @@ export const FrameType = {
 // 帧动作
 export const FrameAction = {
   Run: "run",
+  ApprovePlan: "approve_plan",
   ListProviders: "list_providers",
   CreateCustomProvider: "create_custom_provider",
   DeleteCustomProvider: "delete_custom_provider",
@@ -77,6 +80,7 @@ export const EventType = {
   UserMessage: "user_message",
   AgentChunk: "agent_chunk",
   AgentDone: "agent_done",
+  PlanUpdated: "plan_updated",
   ToolStart: "tool_start",
   ToolResult: "tool_result",
   ToolDiff: "tool_diff",
@@ -101,6 +105,7 @@ export const EventType = {
   BudgetEstimateFailed: "budget_estimate_failed",
   LedgerReconciled: "ledger_reconciled",
   StopReasonDecided: "stop_reason_decided",
+  RunError: "run_error",
   InputNormalized: "input_normalized",
   SkillActivated: "skill_activated",
   SkillDeactivated: "skill_deactivated",
@@ -134,7 +139,20 @@ export const StopReason = {
   FatalError: "fatal_error",
   BudgetExceeded: "budget_exceeded",
   MaxTurnExceeded: "max_turn_exceeded",
+  VerificationFailed: "verification_failed",
   Accepted: "accepted",
+  EmptyResponse: "empty_response",
+  AcceptContinue: "accept_continue",
+  AcceptContinueExhausted: "accept_continue_exhausted",
+  TodoNotConverged: "todo_not_converged",
+  TodoWaitingExternal: "todo_waiting_external",
+  RepeatCycle: "repeat_cycle",
+  MaxTurnExceededWithUnconvergedTodos: "max_turn_exceeded_with_unconverged_todos",
+  MaxTurnExceededWithFailedVerification: "max_turn_exceeded_with_failed_verification",
+  VerificationConfigMissing: "verification_config_missing",
+  VerificationExecutionDenied: "verification_execution_denied",
+  VerificationExecutionError: "verification_execution_error",
+  RequiredTodoFailed: "required_todo_failed",
   RetryExhausted: "retry_exhausted",
 } as const;
 
@@ -217,8 +235,14 @@ export interface RunParams {
 export interface RunInputPart {
   type: string;
   text?: string;
-  media?: { uri: string; mime_type: string; file_name?: string };
+  media?: { uri?: string; asset_id?: string; mime_type: string; file_name?: string };
 }
+
+export interface CreateSessionParams {
+  session_id?: string;
+}
+
+export type CreateSessionResult = RPCResult<{ session_id: string }>;
 
 /** gateway.cancel 参数 */
 export interface CancelParams {
@@ -264,6 +288,12 @@ export interface ResolvePermissionParams {
   decision: string;
 }
 
+export interface ApprovePlanParams {
+  session_id: string;
+  plan_id: string;
+  revision: number;
+}
+
 /** gateway.userQuestionAnswer 参数 */
 export interface ResolveUserQuestionParams {
   request_id: string;
@@ -284,9 +314,17 @@ export interface SessionSummary {
 export interface SessionMessage {
   role: string;
   content: string;
+  parts?: RunInputPart[];
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   is_error?: boolean;
+}
+
+export interface SessionAssetUploadResult {
+  session_id: string;
+  asset_id: string;
+  mime_type: string;
+  size: number;
 }
 
 /** 工具调用 */
@@ -294,6 +332,47 @@ export interface ToolCall {
   id: string;
   name: string;
   arguments: string;
+}
+
+export interface PlanTodoItem {
+  id: string;
+  content: string;
+  status?: string;
+  required?: boolean;
+  artifacts?: string[];
+  failure_reason?: string;
+  blocked_reason?: string;
+  revision?: number;
+}
+
+export interface PlanSpec {
+  goal: string;
+  steps?: string[];
+  constraints?: string[];
+  todos?: PlanTodoItem[];
+  open_questions?: string[];
+}
+
+export interface PlanSummaryView {
+  goal: string;
+  key_steps?: string[];
+  constraints?: string[];
+  active_todo_ids?: string[];
+}
+
+export interface PlanArtifact {
+  id: string;
+  revision: number;
+  status: string;
+  spec: PlanSpec;
+  summary: PlanSummaryView;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlanUpdatedPayload {
+  current_plan?: PlanArtifact;
+  display_text?: string;
 }
 
 /** 会话详情 */
@@ -306,6 +385,7 @@ export interface Session {
   provider?: string;
   model?: string;
   agent_mode?: string;
+  current_plan?: PlanArtifact;
   messages?: SessionMessage[];
 }
 
@@ -356,6 +436,8 @@ export type ListSessionsResult = RPCResult<{ sessions: SessionSummary[] }>;
 
 /** gateway.cancel 响应 */
 export type CancelResult = RPCResult<{ canceled: boolean; run_id: string }>;
+
+export type ApprovePlanResult = RPCResult<{ plan_id: string; revision: number; status: string }>;
 
 export interface TodoViewItem {
   id: string;
@@ -622,6 +704,7 @@ export interface ModelEntry {
   id: string;
   name: string;
   provider: string;
+  capability_hints?: ProviderModelCapabilityHints;
 }
 
 /** gateway.listModels 响应 */

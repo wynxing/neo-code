@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"neo-code/internal/tools"
 	"strings"
 
 	agentsession "neo-code/internal/session"
-	"neo-code/internal/tools"
 )
 
 // Tool 是会话级 Todo 读写工具实现。
@@ -261,11 +261,6 @@ func (t *Tool) Schema() map[string]any {
 			},
 		},
 	}
-}
-
-// MicroCompactPolicy 返回工具微压缩策略。
-func (t *Tool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyCompact
 }
 
 // Execute 执行 todo_write 的 action 分发，并把变更写回会话。

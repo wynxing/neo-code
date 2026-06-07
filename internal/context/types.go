@@ -7,7 +7,6 @@ import (
 	"neo-code/internal/repository"
 	agentsession "neo-code/internal/session"
 	"neo-code/internal/skills"
-	"neo-code/internal/tools"
 )
 
 // Builder builds the provider-facing context for a single model round.
@@ -73,32 +72,7 @@ type RepositoryRetrievalSection struct {
 	Query     string
 }
 
-// MicroCompactPolicySource 定义 context 读取工具 micro compact 策略的最小依赖。
-type MicroCompactPolicySource interface {
-	MicroCompactPolicy(name string) tools.MicroCompactPolicy
-}
-
-// MicroCompactSummarizerSource 定义 context 查找按工具内容摘要器的最小依赖。
-type MicroCompactSummarizerSource interface {
-	MicroCompactSummarizer(name string) tools.ContentSummarizer
-}
-
-// MicroCompactPinChecker 定义上下文层判断单个工具结果是否应钉住（不参与微压缩）的接口。
-type MicroCompactPinChecker interface {
-	ShouldPin(toolName string, metadata map[string]string) bool
-}
-
-// MicroCompactConfig 聚合微压缩所需的三个依赖源，简化 Builder 构造参数。
-// 三个子接口仍各自遵循接口隔离原则；MicroCompactConfig 仅作为构造时的参数打包容器。
-type MicroCompactConfig struct {
-	Policies    MicroCompactPolicySource
-	Summarizers MicroCompactSummarizerSource
-	PinChecker  MicroCompactPinChecker
-}
-
-// CompactOptions controls read-time compact behavior inside the context builder.
+// CompactOptions controls read-time context behavior inside the context builder.
 type CompactOptions struct {
-	DisableMicroCompact           bool
-	MicroCompactRetainedToolSpans int
-	ReadTimeMaxMessageSpans       int
+	ReadTimeMaxMessageSpans int
 }

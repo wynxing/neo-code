@@ -126,8 +126,9 @@ runtime:
         priority: 100
         timeout_sec: 2
         failure_policy: warn_only
-        params:
+        match:
           tool_name: bash
+        params:
           message: "bash is called"
 `
 	writeLoaderConfig(t, loader, raw)
@@ -2105,7 +2106,6 @@ context:
     manual_strategy: keep_recent
     manual_keep_recent_messages: 9
     max_summary_chars: 900
-    micro_compact_retained_tool_spans: 4
     max_archived_prompt_chars: 4096
 `
 	writeLoaderConfig(t, loader, raw)
@@ -2113,9 +2113,6 @@ context:
 	cfg, err := loader.Load(context.Background())
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Context.Compact.MicroCompactRetainedToolSpans != 4 {
-		t.Fatalf("expected micro_compact_retained_tool_spans=4, got %d", cfg.Context.Compact.MicroCompactRetainedToolSpans)
 	}
 	if cfg.Context.Compact.MaxArchivedPromptChars != 4096 {
 		t.Fatalf("expected max_archived_prompt_chars=4096, got %d", cfg.Context.Compact.MaxArchivedPromptChars)
@@ -2127,7 +2124,6 @@ func TestLoaderSaveRoundTripsCompactExtendedFields(t *testing.T) {
 
 	loader := NewLoader(t.TempDir(), testDefaultConfig())
 	cfg := loader.DefaultConfig()
-	cfg.Context.Compact.MicroCompactRetainedToolSpans = 5
 	cfg.Context.Compact.MaxArchivedPromptChars = 3072
 
 	if err := loader.Save(context.Background(), &cfg); err != nil {
@@ -2139,9 +2135,6 @@ func TestLoaderSaveRoundTripsCompactExtendedFields(t *testing.T) {
 		t.Fatalf("read config: %v", err)
 	}
 	text := string(data)
-	if !strings.Contains(text, "micro_compact_retained_tool_spans: 5") {
-		t.Fatalf("expected persisted micro_compact_retained_tool_spans, got:\n%s", text)
-	}
 	if !strings.Contains(text, "max_archived_prompt_chars: 3072") {
 		t.Fatalf("expected persisted max_archived_prompt_chars, got:\n%s", text)
 	}
@@ -2149,9 +2142,6 @@ func TestLoaderSaveRoundTripsCompactExtendedFields(t *testing.T) {
 	loaded, err := loader.Load(context.Background())
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
-	}
-	if loaded.Context.Compact.MicroCompactRetainedToolSpans != 5 {
-		t.Fatalf("expected round-trip micro_compact_retained_tool_spans=5, got %d", loaded.Context.Compact.MicroCompactRetainedToolSpans)
 	}
 	if loaded.Context.Compact.MaxArchivedPromptChars != 3072 {
 		t.Fatalf("expected round-trip max_archived_prompt_chars=3072, got %d", loaded.Context.Compact.MaxArchivedPromptChars)

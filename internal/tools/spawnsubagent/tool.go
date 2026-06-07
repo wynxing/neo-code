@@ -7,12 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"neo-code/internal/tools"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"neo-code/internal/subagent"
-	"neo-code/internal/tools"
 )
 
 const (
@@ -111,11 +111,6 @@ func (t *Tool) Schema() map[string]any {
 			map[string]any{"required": []string{"content"}},
 		},
 	}
-}
-
-// MicroCompactPolicy 保留子代理结果，避免短期压缩时丢失分析链路与结论。
-func (t *Tool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyPreserveHistory
 }
 
 // Execute 解析入参后执行 inline 模式。

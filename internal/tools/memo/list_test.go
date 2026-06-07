@@ -21,9 +21,6 @@ func TestListToolName(t *testing.T) {
 	if tool.Schema() == nil {
 		t.Fatal("Schema() should not be nil")
 	}
-	if tool.MicroCompactPolicy() != tools.MicroCompactPolicyPreserveHistory {
-		t.Fatalf("MicroCompactPolicy() = %v, want PreserveHistory", tool.MicroCompactPolicy())
-	}
 }
 
 func TestListToolExecuteEmpty(t *testing.T) {

@@ -316,6 +316,71 @@ func TestNormalizeJSONRPCRequestCheckpointMethods(t *testing.T) {
 	})
 }
 
+func TestNormalizeJSONRPCRequestApprovePlan(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		normalized, rpcErr := NormalizeJSONRPCRequest(JSONRPCRequest{
+			JSONRPC: JSONRPCVersion,
+			ID:      json.RawMessage(`"approve-plan-1"`),
+			Method:  MethodGatewayApprovePlan,
+			Params:  json.RawMessage(`{"session_id":" session-1 ","plan_id":" plan-1 ","revision":2}`),
+		})
+		if rpcErr != nil {
+			t.Fatalf("normalize approvePlan request: %v", rpcErr)
+		}
+		if normalized.Action != "approve_plan" {
+			t.Fatalf("action = %q, want %q", normalized.Action, "approve_plan")
+		}
+		if normalized.SessionID != "session-1" {
+			t.Fatalf("session_id = %q, want %q", normalized.SessionID, "session-1")
+		}
+		params, ok := normalized.Payload.(ApprovePlanParams)
+		if !ok {
+			t.Fatalf("payload type = %T, want ApprovePlanParams", normalized.Payload)
+		}
+		if params.PlanID != "plan-1" || params.Revision != 2 {
+			t.Fatalf("params = %#v, want plan-1 revision 2", params)
+		}
+	})
+
+	tests := []struct {
+		name            string
+		params          string
+		wantGatewayCode string
+	}{
+		{
+			name:            "missing session",
+			params:          `{"session_id":" ","plan_id":"plan-1","revision":1}`,
+			wantGatewayCode: GatewayCodeMissingRequiredField,
+		},
+		{
+			name:            "missing plan",
+			params:          `{"session_id":"session-1","plan_id":" ","revision":1}`,
+			wantGatewayCode: GatewayCodeMissingRequiredField,
+		},
+		{
+			name:            "invalid revision",
+			params:          `{"session_id":"session-1","plan_id":"plan-1","revision":0}`,
+			wantGatewayCode: GatewayCodeInvalidAction,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, rpcErr := NormalizeJSONRPCRequest(JSONRPCRequest{
+				JSONRPC: JSONRPCVersion,
+				ID:      json.RawMessage(`"approve-plan-invalid"`),
+				Method:  MethodGatewayApprovePlan,
+				Params:  json.RawMessage(tt.params),
+			})
+			if rpcErr == nil || rpcErr.Code != JSONRPCCodeInvalidParams {
+				t.Fatalf("expected invalid params error, got %#v", rpcErr)
+			}
+			if gatewayCode := GatewayCodeFromJSONRPCError(rpcErr); gatewayCode != tt.wantGatewayCode {
+				t.Fatalf("gateway_code = %q, want %q", gatewayCode, tt.wantGatewayCode)
+			}
+		})
+	}
+}
+
 func TestNormalizeJSONRPCRequestRuntimeMethods(t *testing.T) {
 	runRequest := JSONRPCRequest{
 		JSONRPC: JSONRPCVersion,
@@ -328,7 +393,8 @@ func TestNormalizeJSONRPCRequestRuntimeMethods(t *testing.T) {
 			"workdir":" /tmp/work ",
 			"input_parts":[
 				{"type":" TEXT ","text":" world "},
-				{"type":" image ","media":{"uri":" /tmp/a.png ","mime_type":" image/png ","file_name":" a.png "}}
+				{"type":" image ","media":{"uri":" /tmp/a.png ","mime_type":" image/png ","file_name":" a.png "}},
+				{"type":" image ","media":{"asset_id":" asset-1 ","mime_type":" image/webp "}}
 			]
 		}`),
 	}
@@ -349,8 +415,8 @@ func TestNormalizeJSONRPCRequestRuntimeMethods(t *testing.T) {
 	if runParams.InputText != "hello" {
 		t.Fatalf("run input_text = %q, want %q", runParams.InputText, "hello")
 	}
-	if len(runParams.InputParts) != 2 {
-		t.Fatalf("run input_parts len = %d, want 2", len(runParams.InputParts))
+	if len(runParams.InputParts) != 3 {
+		t.Fatalf("run input_parts len = %d, want 3", len(runParams.InputParts))
 	}
 	if runParams.InputParts[0].Type != "text" || runParams.InputParts[0].Text != "world" {
 		t.Fatalf("run text part = %#v, want normalized text part", runParams.InputParts[0])
@@ -360,6 +426,12 @@ func TestNormalizeJSONRPCRequestRuntimeMethods(t *testing.T) {
 	}
 	if runParams.InputParts[1].Media.MimeType != "image/png" || runParams.InputParts[1].Media.FileName != "a.png" {
 		t.Fatalf("run image media = %#v, want trimmed mime/file_name", runParams.InputParts[1].Media)
+	}
+	if runParams.InputParts[2].Type != "image" ||
+		runParams.InputParts[2].Media == nil ||
+		runParams.InputParts[2].Media.AssetID != "asset-1" ||
+		runParams.InputParts[2].Media.MimeType != "image/webp" {
+		t.Fatalf("run image asset media = %#v, want trimmed asset_id/mime", runParams.InputParts[2])
 	}
 
 	compactNormalized, rpcErr := NormalizeJSONRPCRequest(JSONRPCRequest{

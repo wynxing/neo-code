@@ -3,10 +3,10 @@ package codebase
 import (
 	"context"
 	"encoding/json"
+	"neo-code/internal/tools"
 	"strings"
 
 	"neo-code/internal/repository"
-	"neo-code/internal/tools"
 )
 
 // SearchSymbolTool implements the codebase_search_symbol tool.
@@ -51,10 +51,6 @@ func (t *SearchSymbolTool) Schema() map[string]any {
 		},
 		"required": []string{"symbol"},
 	}
-}
-
-func (t *SearchSymbolTool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyCompact
 }
 
 func (t *SearchSymbolTool) Execute(ctx context.Context, call tools.ToolCallInput) (tools.ToolResult, error) {

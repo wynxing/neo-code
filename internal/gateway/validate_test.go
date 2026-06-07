@@ -185,6 +185,76 @@ func TestValidateFrame_BasicRules(t *testing.T) {
 			wantCode: ErrorCodeInvalidAction.String(),
 		},
 		{
+			name: "approve_plan valid payload",
+			frame: MessageFrame{
+				Type:   FrameTypeRequest,
+				Action: FrameActionApprovePlan,
+				Payload: map[string]any{
+					"session_id": "session-1",
+					"plan_id":    "plan-1",
+					"revision":   1,
+				},
+			},
+			wantNil: true,
+		},
+		{
+			name: "approve_plan missing payload",
+			frame: MessageFrame{
+				Type:   FrameTypeRequest,
+				Action: FrameActionApprovePlan,
+			},
+			wantCode:  ErrorCodeMissingRequiredField.String(),
+			wantField: "payload",
+		},
+		{
+			name: "approve_plan missing session_id",
+			frame: MessageFrame{
+				Type:   FrameTypeRequest,
+				Action: FrameActionApprovePlan,
+				Payload: map[string]any{
+					"plan_id":  "plan-1",
+					"revision": 1,
+				},
+			},
+			wantCode:  ErrorCodeMissingRequiredField.String(),
+			wantField: "payload.session_id",
+		},
+		{
+			name: "approve_plan missing plan_id",
+			frame: MessageFrame{
+				Type:   FrameTypeRequest,
+				Action: FrameActionApprovePlan,
+				Payload: map[string]any{
+					"session_id": "session-1",
+					"revision":   1,
+				},
+			},
+			wantCode:  ErrorCodeMissingRequiredField.String(),
+			wantField: "payload.plan_id",
+		},
+		{
+			name: "approve_plan invalid revision",
+			frame: MessageFrame{
+				Type:   FrameTypeRequest,
+				Action: FrameActionApprovePlan,
+				Payload: map[string]any{
+					"session_id": "session-1",
+					"plan_id":    "plan-1",
+					"revision":   0,
+				},
+			},
+			wantCode: ErrorCodeInvalidAction.String(),
+		},
+		{
+			name: "approve_plan invalid payload shape",
+			frame: MessageFrame{
+				Type:    FrameTypeRequest,
+				Action:  FrameActionApprovePlan,
+				Payload: "bad-payload",
+			},
+			wantCode: ErrorCodeInvalidFrame.String(),
+		},
+		{
 			name: "event frame allows empty action",
 			frame: MessageFrame{
 				Type: FrameTypeEvent,
@@ -760,6 +830,23 @@ func TestValidateFrame_MultimodalPayloadRules(t *testing.T) {
 			wantNil: true,
 		},
 		{
+			name: "valid image asset part",
+			frame: MessageFrame{
+				Type:   FrameTypeRequest,
+				Action: FrameActionRun,
+				InputParts: []InputPart{
+					{
+						Type: InputPartTypeImage,
+						Media: &Media{
+							AssetID:  "asset-1",
+							MimeType: "image/png",
+						},
+					},
+				},
+			},
+			wantNil: true,
+		},
+		{
 			name: "text part with empty text",
 			frame: MessageFrame{
 				Type:   FrameTypeRequest,
@@ -782,7 +869,7 @@ func TestValidateFrame_MultimodalPayloadRules(t *testing.T) {
 			wantCode: ErrorCodeInvalidMultimodalPayload.String(),
 		},
 		{
-			name: "image part missing media.uri",
+			name: "image part missing media.uri and media.asset_id",
 			frame: MessageFrame{
 				Type:   FrameTypeRequest,
 				Action: FrameActionRun,
@@ -790,6 +877,24 @@ func TestValidateFrame_MultimodalPayloadRules(t *testing.T) {
 					{
 						Type:  InputPartTypeImage,
 						Media: &Media{MimeType: "image/png"},
+					},
+				},
+			},
+			wantCode: ErrorCodeInvalidMultimodalPayload.String(),
+		},
+		{
+			name: "image part has both media.uri and media.asset_id",
+			frame: MessageFrame{
+				Type:   FrameTypeRequest,
+				Action: FrameActionRun,
+				InputParts: []InputPart{
+					{
+						Type: InputPartTypeImage,
+						Media: &Media{
+							URI:      "file:///a.png",
+							AssetID:  "asset-1",
+							MimeType: "image/png",
+						},
 					},
 				},
 			},

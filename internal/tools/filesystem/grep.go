@@ -5,12 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"neo-code/internal/tools"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-
-	"neo-code/internal/tools"
 )
 
 const defaultGrepResultLimit = 200
@@ -58,11 +57,6 @@ func (t *GrepTool) Schema() map[string]any {
 		},
 		"required": []string{"pattern"},
 	}
-}
-
-// MicroCompactPolicy 声明 grep 工具的历史结果默认参与 micro compact 清理。
-func (t *GrepTool) MicroCompactPolicy() tools.MicroCompactPolicy {
-	return tools.MicroCompactPolicyCompact
 }
 
 func (t *GrepTool) Execute(ctx context.Context, input tools.ToolCallInput) (tools.ToolResult, error) {

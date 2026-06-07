@@ -58,6 +58,8 @@ const (
 	FrameActionGetRuntimeSnapshot FrameAction = "runtime_snapshot_get"
 	// FrameActionResolvePermission 表示提交一次权限审批决策。
 	FrameActionResolvePermission FrameAction = "resolve_permission"
+	// FrameActionApprovePlan 表示批准当前 draft 计划 revision。
+	FrameActionApprovePlan FrameAction = "approve_plan"
 	// FrameActionUserQuestionAnswer 表示提交一次 ask_user 回答。
 	FrameActionUserQuestionAnswer FrameAction = "user_question_answer"
 	// FrameActionDeleteSession 表示删除/归档会话。
@@ -134,6 +136,8 @@ const (
 type Media struct {
 	// URI 是媒体资源地址。
 	URI string `json:"uri"`
+	// AssetID 是已保存的 session asset 标识。
+	AssetID string `json:"asset_id,omitempty"`
 	// MimeType 是媒体 MIME 类型。
 	MimeType string `json:"mime_type"`
 	// FileName 是媒体文件名。

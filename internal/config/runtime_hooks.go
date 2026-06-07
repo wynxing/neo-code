@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/url"
 	"strings"
+
+	"neo-code/internal/runtime/hooks"
 )
 
 const (
@@ -39,22 +41,6 @@ var runtimeHookExternalKinds = map[string]struct{}{
 }
 
 const (
-	runtimeHookPointBeforeToolCall           = "before_tool_call"
-	runtimeHookPointAfterToolResult          = "after_tool_result"
-	runtimeHookPointBeforeCompletionDecision = "before_completion_decision"
-	runtimeHookPointAcceptGate               = "accept_gate"
-	runtimeHookPointBeforePermissionDecision = "before_permission_decision"
-	runtimeHookPointAfterToolFailure         = "after_tool_failure"
-	runtimeHookPointSessionStart             = "session_start"
-	runtimeHookPointSessionEnd               = "session_end"
-	runtimeHookPointUserPromptSubmit         = "user_prompt_submit"
-	runtimeHookPointPreCompact               = "pre_compact"
-	runtimeHookPointPostCompact              = "post_compact"
-	runtimeHookPointSubAgentStart            = "subagent_start"
-	runtimeHookPointSubAgentStop             = "subagent_stop"
-)
-
-const (
 	runtimeHookHandlerRequireFileExists = "require_file_exists"
 	runtimeHookHandlerWarnOnToolCall    = "warn_on_tool_call"
 	runtimeHookHandlerAddContextNote    = "add_context_note"
@@ -78,6 +64,7 @@ type RuntimeHookItemConfig struct {
 	Kind          string         `yaml:"kind,omitempty"`
 	Mode          string         `yaml:"mode,omitempty"`
 	Handler       string         `yaml:"handler,omitempty"`
+	Match         map[string]any `yaml:"match,omitempty"`
 	Priority      int            `yaml:"priority,omitempty"`
 	TimeoutSec    int            `yaml:"timeout_sec,omitempty"`
 	FailurePolicy string         `yaml:"failure_policy,omitempty"`
@@ -203,6 +190,12 @@ func (c RuntimeHookItemConfig) Clone() RuntimeHookItemConfig {
 	if c.Enabled != nil {
 		cloned.Enabled = boolPtr(*c.Enabled)
 	}
+	if len(c.Match) > 0 {
+		cloned.Match = make(map[string]any, len(c.Match))
+		for key, value := range c.Match {
+			cloned.Match[key] = cloneRuntimeHookParamValue(value)
+		}
+	}
 	if len(c.Params) > 0 {
 		cloned.Params = make(map[string]any, len(c.Params))
 		for key, value := range c.Params {
@@ -246,25 +239,11 @@ func (c RuntimeHookItemConfig) Validate(defaultFailurePolicy string) error {
 	if strings.TrimSpace(c.ID) == "" {
 		return fmt.Errorf("id is required")
 	}
-	point := strings.TrimSpace(c.Point)
-	switch point {
-	case runtimeHookPointBeforeToolCall,
-		runtimeHookPointAfterToolResult,
-		runtimeHookPointBeforeCompletionDecision,
-		runtimeHookPointAcceptGate,
-		runtimeHookPointBeforePermissionDecision,
-		runtimeHookPointAfterToolFailure,
-		runtimeHookPointSessionStart,
-		runtimeHookPointSessionEnd,
-		runtimeHookPointUserPromptSubmit,
-		runtimeHookPointPreCompact,
-		runtimeHookPointPostCompact,
-		runtimeHookPointSubAgentStart,
-		runtimeHookPointSubAgentStop:
-	default:
+	point := hooks.HookPoint(strings.TrimSpace(c.Point))
+	if _, ok := hooks.HookPointCapabilities(point); !ok {
 		return fmt.Errorf("point %q is not supported", c.Point)
 	}
-	if !runtimeHookPointUserAllowed(point) {
+	if !hooks.IsUserAllowed(point) {
 		return fmt.Errorf("point %q does not allow user hooks", c.Point)
 	}
 
@@ -307,15 +286,25 @@ func (c RuntimeHookItemConfig) Validate(defaultFailurePolicy string) error {
 		default:
 			return fmt.Errorf("handler %q is not supported", c.Handler)
 		}
-		if handler == runtimeHookHandlerWarnOnToolCall && !hasWarnOnToolCallTargets(c.Params) {
-			return fmt.Errorf("handler %q requires params.tool_name or params.tool_names", c.Handler)
+		if handler == runtimeHookHandlerWarnOnToolCall && !hooks.HasHookMatcherConfig(c.Match) {
+			return fmt.Errorf("handler %q requires match", c.Handler)
+		}
+		if hooks.HasHookMatcherConfig(c.Match) {
+			if err := hooks.ValidateHookMatcher(point, c.Match); err != nil {
+				return fmt.Errorf("match: %w", err)
+			}
 		}
 	case runtimeHookKindCommand:
 		if normalizedMode != runtimeHookModeSync {
 			return fmt.Errorf("mode %q is not supported for kind command (only sync)", c.Mode)
 		}
-		if strings.TrimSpace(readRuntimeHookParamString(c.Params, "command")) == "" {
-			return fmt.Errorf("kind command requires params.command")
+		if err := hooks.ValidateCommandParams(c.Params); err != nil {
+			return err
+		}
+		if hooks.HasHookMatcherConfig(c.Match) {
+			if err := hooks.ValidateHookMatcher(point, c.Match); err != nil {
+				return fmt.Errorf("match: %w", err)
+			}
 		}
 	case runtimeHookKindHTTP:
 		if normalizedMode != runtimeHookModeObserve {
@@ -323,6 +312,11 @@ func (c RuntimeHookItemConfig) Validate(defaultFailurePolicy string) error {
 		}
 		if err := validateRuntimeHTTPObserveItem(c, policy); err != nil {
 			return err
+		}
+		if hooks.HasHookMatcherConfig(c.Match) {
+			if err := hooks.ValidateHookMatcher(point, c.Match); err != nil {
+				return fmt.Errorf("match: %w", err)
+			}
 		}
 	}
 	return nil
@@ -426,35 +420,6 @@ func cloneRuntimeHookParamValue(value any) any {
 	}
 }
 
-func hasWarnOnToolCallTargets(params map[string]any) bool {
-	if len(params) == 0 {
-		return false
-	}
-	toolNameRaw, hasToolName := params["tool_name"]
-	if hasToolName && strings.TrimSpace(fmt.Sprintf("%v", toolNameRaw)) != "" {
-		return true
-	}
-	toolNamesRaw, hasToolNames := params["tool_names"]
-	if !hasToolNames || toolNamesRaw == nil {
-		return false
-	}
-	switch typed := toolNamesRaw.(type) {
-	case []string:
-		for _, item := range typed {
-			if strings.TrimSpace(item) != "" {
-				return true
-			}
-		}
-	case []any:
-		for _, item := range typed {
-			if strings.TrimSpace(fmt.Sprintf("%v", item)) != "" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // readRuntimeHookParamString 以兼容方式读取 runtime hook 参数中的字符串值。
 func readRuntimeHookParamString(params map[string]any, key string) string {
 	if len(params) == 0 {
@@ -469,14 +434,5 @@ func readRuntimeHookParamString(params map[string]any, key string) string {
 		return typed
 	default:
 		return fmt.Sprintf("%v", typed)
-	}
-}
-
-func runtimeHookPointUserAllowed(point string) bool {
-	switch strings.ToLower(strings.TrimSpace(point)) {
-	case runtimeHookPointBeforePermissionDecision, runtimeHookPointPreCompact, runtimeHookPointSubAgentStart:
-		return false
-	default:
-		return true
 	}
 }
