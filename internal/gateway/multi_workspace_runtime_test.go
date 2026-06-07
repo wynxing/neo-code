@@ -864,9 +864,10 @@ var _ SessionAssetPort = (*MultiWorkspaceRuntime)(nil)
 var _ ManagementRuntimePort = (*MultiWorkspaceRuntime)(nil)
 var _ PlanApprovalRuntimePort = (*MultiWorkspaceRuntime)(nil)
 
-// recordingPortWithoutSessionAsset 嵌套 recordingPort 但不实现 SessionAssetPort，
+// recordingPortWithoutSessionAsset 嵌入 RuntimePort 接口（而非具体类型 *recordingPort），
+// 确保只有 RuntimePort 方法被提升、SessionAssetPort 方法不被提升，
 // 用于验证 MultiWorkspaceRuntime 在底层 runtime 不支持附件时的降级处理。
-type recordingPortWithoutSessionAsset struct{ *recordingPort }
+type recordingPortWithoutSessionAsset struct{ RuntimePort }
 
 func TestMultiWorkspaceRuntime_DeleteSessionAssetUnsupportedRuntime(t *testing.T) {
 	idx, alpha, _ := setupIndex(t)
