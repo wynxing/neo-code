@@ -747,6 +747,95 @@ func TestNetworkServerSessionAssetDeleteMissingIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestNetworkServerSessionAssetACLIndependent 验证 GET 和 DELETE 的 ACL 检查相互独立：
+// 只允许 read 时 GET 通过但 DELETE 被拒；只允许 delete 时 DELETE 通过但 GET 被拒。
+func TestNetworkServerSessionAssetACLIndependent(t *testing.T) {
+	t.Run("read allowed delete denied", func(t *testing.T) {
+		readOnlyACL := &ControlPlaneACL{
+			mode:    ACLModeStrict,
+			allow:   map[RequestSource]map[string]struct{}{RequestSourceHTTP: {sessionAssetReadMethod: {}}},
+			enabled: true,
+		}
+		runtimePort := &runtimePortEventStub{
+			openAssetFn: func(context.Context, OpenSessionAssetInput) (OpenSessionAssetResult, error) {
+				return OpenSessionAssetResult{
+					Reader: io.NopCloser(bytes.NewReader(gatewayMinimalPNGBytes())),
+					Meta:   SessionAssetMeta{SessionID: "session-1", AssetID: "asset-1", MimeType: "image/png"},
+				}, nil
+			},
+			deleteAssetFn: func(context.Context, DeleteSessionAssetInput) error {
+				t.Fatal("DeleteSessionAsset should not be called when ACL denies delete")
+				return nil
+			},
+		}
+		server := &NetworkServer{
+			authenticator: staticTokenAuthenticator{token: "gateway-token"},
+			acl:           readOnlyACL,
+			metrics:       NewGatewayMetrics(),
+		}
+		handler := server.buildHandler(runtimePort)
+
+		// GET should succeed (read allowed)
+		readRequest := httptest.NewRequest(http.MethodGet, "/api/session-assets/session-1/asset-1", nil)
+		readRequest.Header.Set("Authorization", "Bearer gateway-token")
+		readRecorder := httptest.NewRecorder()
+		handler.ServeHTTP(readRecorder, readRequest)
+		if readRecorder.Code != http.StatusOK {
+			t.Fatalf("read status = %d, want %d", readRecorder.Code, http.StatusOK)
+		}
+
+		// DELETE should be forbidden (delete denied)
+		deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/session-assets/session-1/asset-1", nil)
+		deleteRequest.Header.Set("Authorization", "Bearer gateway-token")
+		deleteRecorder := httptest.NewRecorder()
+		handler.ServeHTTP(deleteRecorder, deleteRequest)
+		if deleteRecorder.Code != http.StatusForbidden {
+			t.Fatalf("delete status = %d, want %d", deleteRecorder.Code, http.StatusForbidden)
+		}
+	})
+
+	t.Run("delete allowed read denied", func(t *testing.T) {
+		deleteOnlyACL := &ControlPlaneACL{
+			mode:    ACLModeStrict,
+			allow:   map[RequestSource]map[string]struct{}{RequestSourceHTTP: {sessionAssetDeleteMethod: {}}},
+			enabled: true,
+		}
+		runtimePort := &runtimePortEventStub{
+			openAssetFn: func(context.Context, OpenSessionAssetInput) (OpenSessionAssetResult, error) {
+				t.Fatal("OpenSessionAsset should not be called when ACL denies read")
+				return OpenSessionAssetResult{}, nil
+			},
+			deleteAssetFn: func(context.Context, DeleteSessionAssetInput) error {
+				return nil
+			},
+		}
+		server := &NetworkServer{
+			authenticator: staticTokenAuthenticator{token: "gateway-token"},
+			acl:           deleteOnlyACL,
+			metrics:       NewGatewayMetrics(),
+		}
+		handler := server.buildHandler(runtimePort)
+
+		// DELETE should succeed (delete allowed)
+		deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/session-assets/session-1/asset-1", nil)
+		deleteRequest.Header.Set("Authorization", "Bearer gateway-token")
+		deleteRecorder := httptest.NewRecorder()
+		handler.ServeHTTP(deleteRecorder, deleteRequest)
+		if deleteRecorder.Code != http.StatusOK {
+			t.Fatalf("delete status = %d, want %d", deleteRecorder.Code, http.StatusOK)
+		}
+
+		// GET should be forbidden (read denied)
+		readRequest := httptest.NewRequest(http.MethodGet, "/api/session-assets/session-1/asset-1", nil)
+		readRequest.Header.Set("Authorization", "Bearer gateway-token")
+		readRecorder := httptest.NewRecorder()
+		handler.ServeHTTP(readRecorder, readRequest)
+		if readRecorder.Code != http.StatusForbidden {
+			t.Fatalf("read status = %d, want %d", readRecorder.Code, http.StatusForbidden)
+		}
+	})
+}
+
 func TestNetworkServerSessionAssetsRequireAssetPort(t *testing.T) {
 	runtimePort := &runtimePortWithoutSessionAsset{RuntimePort: &runtimePortEventStub{}}
 	server := &NetworkServer{authenticator: staticTokenAuthenticator{token: "gateway-token"}}
