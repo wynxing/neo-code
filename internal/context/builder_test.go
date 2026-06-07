@@ -645,6 +645,40 @@ func TestNewConfiguredBuilder(t *testing.T) {
 		}
 	})
 
+	t.Run("nil extra source is safely ignored", func(t *testing.T) {
+		t.Parallel()
+		builder := NewConfiguredBuilder(nil)
+		input := BuildInput{
+			Messages: []providertypes.Message{{Role: "user", Parts: []providertypes.ContentPart{providertypes.NewTextPart("hello")}}},
+			Metadata: testMetadata(t.TempDir()),
+		}
+		result, err := builder.Build(stdcontext.Background(), input)
+		if err != nil {
+			t.Fatalf("Build() with nil source error = %v", err)
+		}
+		if result.SystemPrompt == "" {
+			t.Fatal("expected non-empty system prompt even with nil extra source")
+		}
+	})
+
+	t.Run("mixed nil and valid extra sources", func(t *testing.T) {
+		t.Parallel()
+		builder := NewConfiguredBuilder(nil, stubPromptSectionSource{
+			sections: []promptSection{{Title: "Valid", Content: "valid section"}},
+		}, nil)
+		input := BuildInput{
+			Messages: []providertypes.Message{{Role: "user", Parts: []providertypes.ContentPart{providertypes.NewTextPart("hello")}}},
+			Metadata: testMetadata(t.TempDir()),
+		}
+		result, err := builder.Build(stdcontext.Background(), input)
+		if err != nil {
+			t.Fatalf("Build() with mixed nil/valid sources error = %v", err)
+		}
+		if !strings.Contains(result.SystemPrompt, "## Valid") {
+			t.Fatal("expected valid section to be present while nil sources are ignored")
+		}
+	})
+
 	t.Run("multiple extra section sources are appended", func(t *testing.T) {
 		builder := NewConfiguredBuilder(stubPromptSectionSource{
 			sections: []promptSection{{Title: "First", Content: "first body"}},

@@ -496,8 +496,8 @@ func (s *NetworkServer) handleSessionAssetRead(writer http.ResponseWriter, reque
 		http.Error(writer, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if !s.isHTTPControlPlaneMethodAllowed(sessionAssetDeleteMethod) {
-		s.writeHTTPAccessDenied(writer, sessionAssetDeleteMethod)
+	if !s.isHTTPControlPlaneMethodAllowed(sessionAssetReadMethod) {
+		s.writeHTTPAccessDenied(writer, sessionAssetReadMethod)
 		return
 	}
 	assetPort, ok := runtimePort.(SessionAssetPort)
@@ -539,8 +539,8 @@ func (s *NetworkServer) handleSessionAssetDelete(writer http.ResponseWriter, req
 		http.Error(writer, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if !s.isHTTPControlPlaneMethodAllowed(sessionAssetReadMethod) {
-		s.writeHTTPAccessDenied(writer, sessionAssetReadMethod)
+	if !s.isHTTPControlPlaneMethodAllowed(sessionAssetDeleteMethod) {
+		s.writeHTTPAccessDenied(writer, sessionAssetDeleteMethod)
 		return
 	}
 	assetPort, ok := runtimePort.(SessionAssetPort)

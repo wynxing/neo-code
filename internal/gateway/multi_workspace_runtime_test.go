@@ -864,6 +864,36 @@ var _ SessionAssetPort = (*MultiWorkspaceRuntime)(nil)
 var _ ManagementRuntimePort = (*MultiWorkspaceRuntime)(nil)
 var _ PlanApprovalRuntimePort = (*MultiWorkspaceRuntime)(nil)
 
+// recordingPortWithoutSessionAsset 嵌套 recordingPort 但不实现 SessionAssetPort，
+// 用于验证 MultiWorkspaceRuntime 在底层 runtime 不支持附件时的降级处理。
+type recordingPortWithoutSessionAsset struct{ *recordingPort }
+
+func TestMultiWorkspaceRuntime_DeleteSessionAssetUnsupportedRuntime(t *testing.T) {
+	idx, alpha, _ := setupIndex(t)
+	builder := newTestBuilder()
+	// 将 alpha 的 port 替换为不支持 SessionAssetPort 的版本
+	alphaPort := newRecordingPort("alpha-no-asset")
+	builder.ports[alpha.Path] = alphaPort
+	mw := NewMultiWorkspaceRuntime(idx, alpha.Hash, func(ctx context.Context, workdir string) (RuntimePort, func() error, error) {
+		port, cleanup, err := builder.build(ctx, workdir)
+		if err != nil {
+			return nil, nil, err
+		}
+		rp := port.(*recordingPort)
+		return &recordingPortWithoutSessionAsset{rp}, cleanup, nil
+	})
+	t.Cleanup(func() { _ = mw.Close() })
+
+	alphaCtx := ctxWithHash(t, alpha.Hash)
+	err := mw.DeleteSessionAsset(alphaCtx, DeleteSessionAssetInput{SessionID: "s-1", AssetID: "a-1"})
+	if err == nil {
+		t.Fatal("expected error when runtime does not implement SessionAssetPort")
+	}
+	if !errors.Is(err, ErrRuntimeUnavailable) {
+		t.Fatalf("error = %v, want ErrRuntimeUnavailable", err)
+	}
+}
+
 // guard helper: ensure recordingPort builds correctly under sync access.
 func TestRecordingPort_Concurrent(t *testing.T) {
 	p := newRecordingPort("c")

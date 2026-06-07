@@ -19,7 +19,9 @@ func newStablePromptSources(extra ...SectionSource) []promptSectionSource {
 		newRulesPromptSource(nil),
 	}
 	for _, src := range extra {
-		sources = append(sources, src)
+		if src != nil {
+			sources = append(sources, src)
+		}
 	}
 	return sources
 }

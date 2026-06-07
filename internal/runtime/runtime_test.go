@@ -4932,6 +4932,69 @@ func TestProjectImagesForModelRequestCapabilityStates(t *testing.T) {
 	}
 }
 
+// TestProjectImagesForModelRequestEmptyMessages 验证空消息列表不会 panic 并正确返回空结果。
+func TestProjectImagesForModelRequestEmptyMessages(t *testing.T) {
+	t.Parallel()
+	models := []providertypes.ModelDescriptor{{ID: "model-a", CapabilityHints: providertypes.ModelCapabilityHints{
+		ImageInput: providertypes.ModelCapabilityStateUnsupported,
+	}}}
+	projected, err := projectImagesForModelRequest("model-a", models, nil, []providertypes.ContentPart{providertypes.NewTextPart("hello")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(projected) != 0 {
+		t.Fatalf("expected empty projected messages, got %d", len(projected))
+	}
+}
+
+// TestProjectImagesForModelRequestMixedMessages 验证混合图片和文本的消息中只有图片被投影降级。
+func TestProjectImagesForModelRequestMixedMessages(t *testing.T) {
+	t.Parallel()
+	messages := []providertypes.Message{
+		{
+			Role:  providertypes.RoleUser,
+			Parts: []providertypes.ContentPart{providertypes.NewTextPart("text before image")},
+		},
+		{
+			Role:  providertypes.RoleUser,
+			Parts: []providertypes.ContentPart{providertypes.NewSessionAssetImagePart("asset-1", "image/png")},
+		},
+		{
+			Role:  providertypes.RoleAssistant,
+			Parts: []providertypes.ContentPart{providertypes.NewTextPart("response")},
+		},
+	}
+	models := []providertypes.ModelDescriptor{{ID: "model-a", CapabilityHints: providertypes.ModelCapabilityHints{
+		ImageInput: providertypes.ModelCapabilityStateUnsupported,
+	}}}
+	projected, err := projectImagesForModelRequest("model-a", models, messages, []providertypes.ContentPart{providertypes.NewTextPart("current text")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(projected) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(projected))
+	}
+	// 第一条消息应保持纯文本不变
+	if projected[0].Parts[0].Kind != providertypes.ContentPartText {
+		t.Fatalf("first message should be text, got %s", projected[0].Parts[0].Kind)
+	}
+	// 第二条消息中的图片应被替换为占位文本
+	if messagesContainImages(projected) {
+		t.Fatal("expected no images in projected messages for unsupported model")
+	}
+	if !strings.Contains(renderPartsForTest(projected[1].Parts), historicalImageOmittedForModel) {
+		t.Fatal("expected historical image omitted placeholder in second message")
+	}
+	// 第三条消息应保持不变
+	if projected[2].Parts[0].Kind != providertypes.ContentPartText {
+		t.Fatalf("third message should be text, got %s", projected[2].Parts[0].Kind)
+	}
+	// 原始消息不应被修改
+	if !messagesContainImages(messages) {
+		t.Fatal("original messages should still contain images")
+	}
+}
+
 func newRuntimeConfigManager(t *testing.T) *config.Manager {
 	return newRuntimeConfigManagerWithProviderEnvs(t, nil)
 }
