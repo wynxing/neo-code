@@ -753,7 +753,7 @@ func TestNetworkServerSessionAssetACLIndependent(t *testing.T) {
 	t.Run("read allowed delete denied", func(t *testing.T) {
 		readOnlyACL := &ControlPlaneACL{
 			mode:    ACLModeStrict,
-			allow:   map[RequestSource]map[string]struct{}{RequestSourceHTTP: {sessionAssetReadMethod: {}}},
+			allow:   map[RequestSource]map[string]struct{}{RequestSourceHTTP: normalizedMethodSet(sessionAssetReadMethod)},
 			enabled: true,
 		}
 		runtimePort := &runtimePortEventStub{
@@ -797,7 +797,7 @@ func TestNetworkServerSessionAssetACLIndependent(t *testing.T) {
 	t.Run("delete allowed read denied", func(t *testing.T) {
 		deleteOnlyACL := &ControlPlaneACL{
 			mode:    ACLModeStrict,
-			allow:   map[RequestSource]map[string]struct{}{RequestSourceHTTP: {sessionAssetDeleteMethod: {}}},
+			allow:   map[RequestSource]map[string]struct{}{RequestSourceHTTP: normalizedMethodSet(sessionAssetDeleteMethod)},
 			enabled: true,
 		}
 		runtimePort := &runtimePortEventStub{
