@@ -30,6 +30,7 @@ type recordingPort struct {
 	cancelCalls       atomic.Int32
 	saveAssetCalls    atomic.Int32
 	openAssetCalls    atomic.Int32
+	deleteAssetCalls  atomic.Int32
 	closed            atomic.Int32
 	closeOnce         sync.Once
 
@@ -145,6 +146,11 @@ func (p *recordingPort) SaveSessionAsset(_ context.Context, input SaveSessionAss
 func (p *recordingPort) OpenSessionAsset(_ context.Context, input OpenSessionAssetInput) (OpenSessionAssetResult, error) {
 	p.openAssetCalls.Add(1)
 	return OpenSessionAssetResult{Meta: SessionAssetMeta{SessionID: input.SessionID, AssetID: input.AssetID}}, nil
+}
+
+func (p *recordingPort) DeleteSessionAsset(_ context.Context, _ DeleteSessionAssetInput) error {
+	p.deleteAssetCalls.Add(1)
+	return nil
 }
 
 func (p *recordingPort) DeleteSession(_ context.Context, _ DeleteSessionInput) (bool, error) {
@@ -801,6 +807,9 @@ func TestMultiWorkspaceRuntime_RoutingMatrix(t *testing.T) {
 	if _, err := mw.OpenSessionAsset(alphaCtx, OpenSessionAssetInput{SessionID: "s-1", AssetID: "asset-1"}); err != nil {
 		t.Fatalf("OpenSessionAsset alpha: %v", err)
 	}
+	if err := mw.DeleteSessionAsset(betaCtx, DeleteSessionAssetInput{SessionID: "s-1", AssetID: "asset-1"}); err != nil {
+		t.Fatalf("DeleteSessionAsset beta: %v", err)
+	}
 
 	alphaPort := builder.portFor(alpha.Path)
 	betaPort := builder.portFor(beta.Path)
@@ -825,6 +834,9 @@ func TestMultiWorkspaceRuntime_RoutingMatrix(t *testing.T) {
 	if got := alphaPort.openAssetCalls.Load(); got != 1 {
 		t.Fatalf("alpha OpenSessionAsset calls = %d, want 1", got)
 	}
+	if got := betaPort.deleteAssetCalls.Load(); got != 1 {
+		t.Fatalf("beta DeleteSessionAsset calls = %d, want 1", got)
+	}
 }
 
 func TestMultiWorkspaceRuntime_ListWorkspacesMatchesIndex(t *testing.T) {
@@ -848,8 +860,40 @@ func TestMultiWorkspaceRuntime_ListWorkspacesMatchesIndex(t *testing.T) {
 
 // guard against future drift: MultiWorkspaceRuntime must implement RuntimePort and ManagementRuntimePort.
 var _ RuntimePort = (*MultiWorkspaceRuntime)(nil)
+var _ SessionAssetPort = (*MultiWorkspaceRuntime)(nil)
 var _ ManagementRuntimePort = (*MultiWorkspaceRuntime)(nil)
 var _ PlanApprovalRuntimePort = (*MultiWorkspaceRuntime)(nil)
+
+// recordingPortWithoutSessionAsset 嵌入 RuntimePort 接口（而非具体类型 *recordingPort），
+// 确保只有 RuntimePort 方法被提升、SessionAssetPort 方法不被提升，
+// 用于验证 MultiWorkspaceRuntime 在底层 runtime 不支持附件时的降级处理。
+type recordingPortWithoutSessionAsset struct{ RuntimePort }
+
+func TestMultiWorkspaceRuntime_DeleteSessionAssetUnsupportedRuntime(t *testing.T) {
+	idx, alpha, _ := setupIndex(t)
+	builder := newTestBuilder()
+	// 将 alpha 的 port 替换为不支持 SessionAssetPort 的版本
+	alphaPort := newRecordingPort("alpha-no-asset")
+	builder.ports[alpha.Path] = alphaPort
+	mw := NewMultiWorkspaceRuntime(idx, alpha.Hash, func(ctx context.Context, workdir string) (RuntimePort, func() error, error) {
+		port, cleanup, err := builder.build(ctx, workdir)
+		if err != nil {
+			return nil, nil, err
+		}
+		rp := port.(*recordingPort)
+		return &recordingPortWithoutSessionAsset{rp}, cleanup, nil
+	})
+	t.Cleanup(func() { _ = mw.Close() })
+
+	alphaCtx := ctxWithHash(t, alpha.Hash)
+	err := mw.DeleteSessionAsset(alphaCtx, DeleteSessionAssetInput{SessionID: "s-1", AssetID: "a-1"})
+	if err == nil {
+		t.Fatal("expected error when runtime does not implement SessionAssetPort")
+	}
+	if !errors.Is(err, ErrRuntimeUnavailable) {
+		t.Fatalf("error = %v, want ErrRuntimeUnavailable", err)
+	}
+}
 
 // guard helper: ensure recordingPort builds correctly under sync access.
 func TestRecordingPort_Concurrent(t *testing.T) {
